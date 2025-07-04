@@ -33,6 +33,9 @@
 #define PAGE_DEBUG_BODY_PART 6
 #define PAGE_DEBUG_BODY_FULL 7
 
+#define DEFAULT_URL_EMPTY "https://my.domain.net/empty.php"
+#define DEFAULT_URL_STATUS "https://my.domain.net/status.php"
+
 INCTXT(JQuery, "jquery-3.7.1.min.js");  // -> gJQueryData , see https://github.com/AlexIII/incbin-arduino
 
 // Wemos D1 Mini ESP32
@@ -46,8 +49,8 @@ double overallAverageHumidity, lastOverallAverageHumidity;
 WiFiServer server(80);
 unsigned long startOfMainLoop, lastMillis60s, startPumpMillis, lastPumpRunStart;
 int page;
-bool checkWifiConnectionFlag = true, checkAverage, humidityThresholdHysteresisFalling;
-char ssid[32 + 1], pwd[63 + 1], emptyWaterURL[256], reportURL[256];
+bool checkWifiConnectionFlag = true, humidityThresholdHysteresisFalling, serialDebug, serialDebugActive;
+String ssid, pwd, emptyWaterURL, reportURL;
 int humidityThreshold1, humidityThreshold2, pumpDelayInMinutes, dryWetPumpBorderValue;
 double pumpRuntimeInSeconds;
 int lastPumpCurrentValue;
@@ -58,9 +61,13 @@ int debugBufferIndexNextEmpty, debugBufferIndexLastShown;
 
 // Variadic template function
 template<typename... Args> void debug(Args... args) {
+  if (serialDebug)
+    Serial.print(args...);
   (debugBufferLine += String(args), ...);
 }
 template<typename... Args> void debugln(Args... args) {
+  if (serialDebug)
+    Serial.println(args...);
   (debugBufferLine += String(args), ...);
   //debugln(debugBufferLine);
   unsigned long now = (millis() + 500) / 1000;  // Seconds
@@ -71,9 +78,12 @@ template<typename... Args> void debugln(Args... args) {
   if (debugBufferIndexLastShown == debugBufferIndexNextEmpty)  // If circular buffer is full release oldest entry
     debugBufferIndexLastShown = (debugBufferIndexLastShown + 1) % DEBUG_BUFFER_SIZE;
 }
+void debugLineNumber(const unsigned int line) {
+  if (serialDebug)
+    Serial.println(line);
+}
 
 void setup() {
-  //Serial.begin(115200);
   analogReadResolution(10);  // Backwards compatibility: 0-1023
   pinMode(LED_BUILTIN, OUTPUT);
 
@@ -96,15 +106,15 @@ void setup() {
   }
   overallAverageHumidity /= sensorPortTotalNumber;
 
-  prefs.getBytes("ssid", &ssid, sizeof(ssid));
-  prefs.getBytes("password", &pwd, sizeof(pwd));
+  ssid = prefs.getString("ssid");
+  pwd = prefs.getString("password");
   humidityThreshold1 = prefs.getInt("threshold1");
   humidityThreshold2 = prefs.getInt("threshold2");
   pumpRuntimeInSeconds = prefs.getDouble("pumptime");
   pumpDelayInMinutes = prefs.getInt("pumpdelay");
   dryWetPumpBorderValue = prefs.getInt("drypump");
-  prefs.getBytes("emptyUrl", &emptyWaterURL, sizeof(emptyWaterURL));
-  prefs.getBytes("reportURL", &reportURL, sizeof(reportURL));
+  emptyWaterURL = prefs.getString("emptyUrl");
+  reportURL = prefs.getString("reportURL");
   if (!anySensorActive) {
     debugln("No GPIO enabled, activating first in line");
     char portname[7];  // gpioXX\0
@@ -120,7 +130,7 @@ void setup() {
     humidityThreshold2 = 54;      // Dry: ~673, Submerged: ~264 absolute
     prefs.putInt("threshold2", humidityThreshold2);
   }
-  if (pumpRuntimeInSeconds == 0) {
+  if (isnan(pumpRuntimeInSeconds)) {
     pumpRuntimeInSeconds = 2.5;
     prefs.putDouble("pumptime", pumpRuntimeInSeconds);
   }
@@ -132,13 +142,13 @@ void setup() {
     dryWetPumpBorderValue = 300;  // Dry: ~130 mA, Submerged: ~397 Ah // TODO
     prefs.putInt("drypump", dryWetPumpBorderValue);
   }
-  if (emptyWaterURL == "") {
-    strcpy(emptyWaterURL, "https://my.domain.net/empty.php");
-    prefs.putBytes("emptyUrl", (byte*)(&emptyWaterURL), sizeof(emptyWaterURL));
+  if (emptyWaterURL == NULL) {
+    emptyWaterURL = DEFAULT_URL_EMPTY;
+    prefs.putString("emptyUrl", emptyWaterURL);
   }
-  if (reportURL == "") {
-    strcpy(reportURL, "https://my.domain.net/status.php");
-    prefs.putBytes("reportURL", (byte*)(&reportURL), sizeof(reportURL));
+  if (reportURL == NULL) {
+    reportURL = DEFAULT_URL_STATUS;
+    prefs.putString("reportURL", reportURL);
   }
 
   if (!connectToWiFi()) {
@@ -153,7 +163,14 @@ void loop() {
   if (startOfMainLoop == 0)
     startOfMainLoop = millis();  // For averaging stuff warmup phase
 
+  if (serialDebug && !serialDebugActive) {  // Only initialize once
+    Serial.begin(115200);
+    serialDebugActive = true;
+  }
+
+  debugLineNumber(__LINE__);
   webServerReaction();
+  debugLineNumber(__LINE__);
 
   overallAverageHumidity = 0;
   int sensorcount = 0;
@@ -167,9 +184,12 @@ void loop() {
   overallAverageHumidity /= sensorcount;
   overallAverageHumidity = map(overallAverageHumidity, 673, 264, 0, 100);  // Translation to percent
 
+  debugLineNumber(__LINE__);
+
   unsigned long currentMillis = millis();
   // Pump mode hysteresis for mold prevention - only check for switching down after pump cooldown!
   if (!humidityThresholdHysteresisFalling && overallAverageHumidity > humidityThreshold1 && (lastPumpRunStart == 0 || currentMillis > lastPumpRunStart + pumpDelayInMinutes * 60000)) {
+    debugLineNumber(__LINE__);
     debug("Average humidity (");
     debug(overallAverageHumidity);
     debug(") is above upper threshold (");
@@ -177,6 +197,7 @@ void loop() {
     debugln("), switching to falling mode");
     humidityThresholdHysteresisFalling = true;
   } else if (humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold2) {
+    debugLineNumber(__LINE__);
     debug("Average humidity (");
     debug(overallAverageHumidity);
     debug(") is below lower threshold (");
@@ -187,13 +208,16 @@ void loop() {
 
   currentMillis = millis();
   if (lastOverallAverageHumidity != overallAverageHumidity && currentMillis - startOfMainLoop > 5000) {  // Only after average warmup
+    debugLineNumber(__LINE__);
     doStatusReporting();
     lastOverallAverageHumidity = overallAverageHumidity;
   }
 
   currentMillis = millis();
   if (currentMillis - lastMillis60s > 60000) {
+    debugLineNumber(__LINE__);
     if (checkWifiConnectionFlag) {
+      debugLineNumber(__LINE__);
       doCheckWiFiConnection();
       debugln(getAvgValues());
     }
@@ -202,6 +226,7 @@ void loop() {
 
   currentMillis = millis();
   if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold1 && currentMillis - startOfMainLoop > 5000 && (lastPumpRunStart == 0 || currentMillis > lastPumpRunStart + pumpDelayInMinutes * 60000)) {  // Only after average warmup
+    debugLineNumber(__LINE__);
     debug("Average humidity (");
     debug(overallAverageHumidity);
     debug(") is lower than upper threshold (");
@@ -210,14 +235,19 @@ void loop() {
     startPump();
   }
 
-  if (lastPumpCurrentValue > 0)     // DEBUG
-    debugln(lastPumpCurrentValue);  // DEBUG
+  if (lastPumpCurrentValue > 0) {  // DEBUG
+    debugLineNumber(__LINE__);
+    debugln(String(lastPumpCurrentValue) + " mA");  // DEBUG
+  }
 
   currentMillis = millis();
-  if (startPumpMillis != 0 && checkAverage && currentMillis - startPumpMillis > pumpRuntimeInSeconds * 700) {  // Check at 0.7 of pump runtime
+  if (startPumpMillis != 0 && (currentMillis - startPumpMillis > pumpRuntimeInSeconds * 1000 || currentMillis < startPumpMillis)) {  // Force switch off pump in case of timer overflow (every ~52 days)
+    stopPump();
+    debugLineNumber(__LINE__);
     debug("Average current: ");
     debugln(lastPumpCurrentValue);
     if (lastPumpCurrentValue < dryWetPumpBorderValue) {
+      debugLineNumber(__LINE__);
       debug("Average current (");
       debug(lastPumpCurrentValue);
       debug(") is lower than threshold (");
@@ -225,12 +255,6 @@ void loop() {
       debugln("), reporting water is empty");
       doEmptyWaterWarning();
     }
-    checkAverage = false;
-  }
-
-  currentMillis = millis();
-  if (startPumpMillis != 0 && (currentMillis - startPumpMillis > pumpRuntimeInSeconds * 1000 || currentMillis < startPumpMillis)) {  // Force switch off pump in case of timer overflow (every ~52 days)
-    stopPump();
   }
 
   for (int t = 0; t < 30; t++)
@@ -240,6 +264,11 @@ void loop() {
 }
 
 void doEmptyWaterWarning() {
+  debugLineNumber(__LINE__);
+  if (emptyWaterURL == "" || emptyWaterURL == DEFAULT_URL_EMPTY) {
+    debugln("Empty water supply url not set, aborting");
+    return;
+  }
   if (WiFi.status() == WL_CONNECTED) {
     debug("Request: ");
     debugln(emptyWaterURL);
@@ -257,6 +286,11 @@ void doEmptyWaterWarning() {
 }
 
 void doStatusReporting() {
+  debugLineNumber(__LINE__);
+  if (reportURL == "" || reportURL == DEFAULT_URL_STATUS) {
+    debugln("Status url not set, aborting");
+    return;
+  }
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
     http.begin(String(reportURL) + "?oah=" + overallAverageHumidity);
@@ -272,6 +306,7 @@ void doStatusReporting() {
 }
 
 String getAvgValues() {
+  debugLineNumber(__LINE__);
   char buffer[7];
   String retVal = "[";
   for (int v = 0; v < sensorPortTotalNumber; v++) {
@@ -288,7 +323,6 @@ void startPump() {
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, LOW);
   startPumpMillis = millis();
   lastPumpRunStart = startPumpMillis;
-  checkAverage = true;
 }
 
 void stopPump() {
@@ -315,7 +349,7 @@ bool connectToWiFi() {
     debug("Success: ");
     debugln(WiFi.localIP().toString());
     server.begin();
-    delay(50);
+    delay(100);
     digitalWrite(LED_BUILTIN, LOW);
     return true;
   } else {
@@ -324,6 +358,7 @@ bool connectToWiFi() {
 }
 
 void doCheckWiFiConnection() {
+  debugLineNumber(__LINE__);
   if (WiFi.status() != WL_CONNECTED) {
     debugln("Connection lost, reconnecting...");
     connectToWiFi();
@@ -371,6 +406,7 @@ String wpspin2string(uint8_t a[]) {
 
 // WARNING: WiFiEvent is called from a separate FreeRTOS task (thread)!
 void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
+  debugLineNumber(__LINE__);
   switch (event) {
     case ARDUINO_EVENT_WIFI_STA_START:
       debugln("Station Mode Started");
@@ -378,10 +414,10 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       debugln("Connecting to SSID: " + WiFi.SSID());
       //debugln("Password: " + WiFi.psk()); // DEBUG
-      WiFi.SSID().toCharArray(ssid, WiFi.SSID().length() + 1);  // +1 for \0 terminator
-      WiFi.psk().toCharArray(pwd, WiFi.psk().length() + 1);     // +1 for \0 terminator
-      prefs.putBytes("ssid", (byte*)(&ssid), sizeof(ssid));
-      prefs.putBytes("password", (byte*)(&pwd), sizeof(pwd));
+      ssid = WiFi.SSID();
+      pwd = WiFi.psk();
+      prefs.putString("ssid", ssid);
+      prefs.putString("password", pwd);
       debug("Success: ");
       debugln(WiFi.localIP().toString());
       digitalWrite(LED_BUILTIN, LOW);
@@ -417,6 +453,7 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
 }
 
 void webServerReaction() {
+  debugLineNumber(__LINE__);
   WiFiClient client = server.accept();
   if (client) {
     String currentLine = "";
@@ -426,37 +463,37 @@ void webServerReaction() {
         if (c == '\n') {
           //debugln(currentLine); // DEBUG
           if (currentLine.startsWith("GET /H")) {
-            debugln(client.remoteIP().toString() + " -> Humidity value block  : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Humidity value block  : " + currentLine);
             page = PAGE_HUMIDITYVAL;
           } else if (currentLine.startsWith("GET /O")) {
-            debugln(client.remoteIP().toString() + " -> Overall Humidity block: " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Overall Humidity block: " + currentLine);
             page = PAGE_HUMIDITY;
           } else if (currentLine.startsWith("GET /P")) {
-            debugln(client.remoteIP().toString() + " -> Pump current block    : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Pump current block    : " + currentLine);
             page = PAGE_PUMPVAL;
           } else if (currentLine.startsWith("GET /T")) {
-            debugln(client.remoteIP().toString() + " -> Pump test activate    : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Pump test activate    : " + currentLine);
             startPump();
           } else if (currentLine.startsWith("GET /E")) {
-            debugln(client.remoteIP().toString() + " -> Empty test activate   : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Empty test activate   : " + currentLine);
             doEmptyWaterWarning();
           } else if (currentLine.startsWith("GET /R")) {
-            debugln(client.remoteIP().toString() + " -> Report test activate  : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Report test activate  : " + currentLine);
             doStatusReporting();
           } else if (currentLine.startsWith("GET /JQ.js")) {
-            debugln(client.remoteIP().toString() + " -> JQuery file           : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> JQuery file           : " + currentLine);
             page = PAGE_JQUERY;
           } else if (currentLine.startsWith("GET /Da")) {
-            debugln(client.remoteIP().toString() + " -> Debug main page       : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Debug main page       : " + currentLine);
             page = PAGE_DEBUG;
           } else if (currentLine.startsWith("GET /Db")) {
-            //debugln(client.remoteIP().toString() + " -> Debug body (part)     : " + currentLine); // DEBUG
+            //debugln(client.remoteIP().toString() + " -> Debug body (part)     : " + currentLine);
             page = PAGE_DEBUG_BODY_PART;
           } else if (currentLine.startsWith("GET /Dc")) {
-            debugln(client.remoteIP().toString() + " -> Debug body (full)     : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Debug body (full)     : " + currentLine);
             page = PAGE_DEBUG_BODY_FULL;
           } else if (currentLine.startsWith("GET /")) {
-            debugln(client.remoteIP().toString() + " -> Default page          : " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Default page          : " + currentLine);
             if (currentLine.indexOf("?") != -1) {
               for (int v = 0; v < sensorPortTotalNumber; v++) {
                 char portname[7];  // gpioXX\0
@@ -464,6 +501,7 @@ void webServerReaction() {
                 activeSensor[v] = currentLine.indexOf(portname) != -1;
                 prefs.putBool(portname, activeSensor[v]);
               }
+              serialDebug = currentLine.indexOf("serialDebug") != -1;
             }
             if (currentLine.indexOf("threshold1") != -1) {
               humidityThreshold1 = currentLine.substring(currentLine.indexOf("threshold1") + String("threshold1").length() + 1).toInt();
@@ -498,11 +536,9 @@ void webServerReaction() {
               b = b == -1 ? 99999 : b;
               URLCode url;
               url.urlcode = currentLine.substring(start, min(a, b));
-              debugln(url.urlcode);
               url.urldecode();
-              debugln(url.strcode);
-              url.strcode.toCharArray(emptyWaterURL, sizeof(emptyWaterURL));
-              prefs.putBytes("emptyUrl", (byte*)(&emptyWaterURL), sizeof(emptyWaterURL));
+              emptyWaterURL = url.strcode;
+              prefs.putString("emptyUrl", emptyWaterURL);
             }
             if (currentLine.indexOf("reportURL") != -1) {
               const int start = currentLine.indexOf("reportURL") + String("reportURL").length() + 1;
@@ -512,11 +548,9 @@ void webServerReaction() {
               b = b == -1 ? 99999 : b;
               URLCode url;
               url.urlcode = currentLine.substring(start, min(a, b));
-              debugln(url.urlcode);
               url.urldecode();
-              debugln(url.strcode);
-              url.strcode.toCharArray(reportURL, sizeof(reportURL));
-              prefs.putBytes("reportURL", (byte*)(&reportURL), sizeof(reportURL));
+              reportURL = url.strcode;
+              prefs.putString("reportURL", reportURL);
             }
           }
           if (currentLine.length() == 0) {
@@ -587,10 +621,13 @@ void webServerReaction() {
               client.println("</td><td><span id=\"hd\">[]</span></td></tr>");
               client.print("<tr title=\"Bei überschreiten dieser prozentualen Feuchte wird das zyklische Pumpen zur Schimmelvermeidung deaktiviert.\"><td>Feuchteschwellwert 1:</td><td><input name=\"threshold1\" size=\"10\" value=\"");
               client.print(humidityThreshold1);
-              client.println("\">&nbsp;(<span id=\"ho\">[]</span>%)</td></tr>");
-              client.print("<tr title=\"Bei unterschreiten dieser prozentualen Feuchte wird das zyklische Pumpen wieder aktiviert.\"><td>Feuchteschwellwert 2:</td><td><input name=\"threshold2\" size=\"10\" value=\"");
+              client.println("\">&nbsp;(Aktuell: <span id=\"ho\">[]</span> %)</td></tr>");
+              client.print("<tr><td title=\"Bei unterschreiten dieser prozentualen Feuchte wird das zyklische Pumpen wieder aktiviert.\">Feuchteschwellwert 2:</td><td><input name=\"threshold2\" size=\"10\" value=\"");
               client.print(humidityThreshold2);
-              client.println("\"></td></tr>");
+              client.print("\"></td><td title=\"Debugging auf die serielle Schnittstelle mit 115200 Baud.\"><input type=\"checkbox\" name=\"serialDebug\"");
+              if (serialDebug)
+                client.print(" checked");
+              client.println("> Serial Debug</td></tr>");
               client.print("<tr title=\"Pumpenlaufzeit in Sekunden bei Erreichen des Feuchteschwellwerts oder beim Pumpentest.\"><td>Pumpenlaufzeit:</td><td><input name=\"pumptime\" size=\"10\" value=\"");
               client.print(pumpRuntimeInSeconds);
               client.println("\">&nbsp;s<td></td></tr>");
@@ -600,11 +637,11 @@ void webServerReaction() {
               client.print("<tr title=\"Der eingetragene Wert muss zwischen dem angezeigten Wert bei laufender Pumpe bei vollem Wassertank und bei leerem Wassertank liegen. "
                            "Tipp: Der Wert für den jeweiligen Durchgang wird im Debug Log ausgegeben.\"><td>Wasserstandserkennung:</td><td><input name=\"drypump\" size=\"10\" value=\"");
               client.print(dryWetPumpBorderValue);
-              client.println("\">&nbsp;(<span id=\"pc\">0</span>mA)</td><td><a href=\"/T\">Test</a></td></tr>");
+              client.println("\">&nbsp;(Aktuell: <span id=\"pc\">0</span> mA)</td><td><a href=\"/T\">Test</a></td></tr>");
               client.print("<tr title=\"Diese URL wird aufgerufen, wenn erkannt wird, dass die Pumpe trocken läuft, also der Wasservorrat erschöpft ist. Sie muss mit http:// oder https:// "
                            "beginnen und vom Sensor aus erreichbar sein.\"><td>Fehlermeldung an:</td><td><input name=\"emptyUrl\" maxlength=\"255\" size=\"60\" value=\"");
               client.print(emptyWaterURL);
-              client.println("\">&nbsp;</td><td><a href=\"/E\">Fehlertest</a></td></tr>");
+              client.println("\">&nbsp;</td><td><a href=\"/E\">Test</a></td></tr>");
               client.print("<tr title=\"Diese URL wird zyklisch mit den aktuellen Feuchtewerten aufgerufen. Sie muss mit http:// oder https:// beginnen und vom Sensor aus erreichbar sein.\">"
                            "<td>Statusreports an:</td><td><input name=\"reportURL\" maxlength=\"255\" size=\"60\" value=\"");
               client.print(reportURL);
