@@ -224,7 +224,7 @@ void loop() {
   }
 
   currentMillis = millis();
-  if (lastOverallAverageHumidity != overallAverageHumidity && currentMillis - startOfMainLoop > 5000) {  // Only after average warmup
+  if (abs(lastOverallAverageHumidity - overallAverageHumidity) > 1 && currentMillis - startOfMainLoop > 5000) {  // Only after average warmup
     debugLineNumber(__LINE__);
     doStatusReporting();
     lastOverallAverageHumidity = overallAverageHumidity;
@@ -661,7 +661,7 @@ void webServerReaction() {
               client.println("		<form action=\"/\">");
               client.println("			<table>");
               client.println("				<tr>");
-              client.println("					<th>Sensor an</th>");
+              client.println("					<th>Sensor</th>");
               client.println("					<th>Aktiv</th>");
               client.println("					<th title=\"Sensorwert an der freien Luft\">Trocken</th>");
               client.println("					<th title=\"Sensorwert im Wasserglas\">Nass</th>");
@@ -701,7 +701,7 @@ void webServerReaction() {
               client.println("					<td><a href=\"/T\">Test</a></td>");
               client.println("				</tr>");
               client.println("				<tr title=\"Diese URL wird aufgerufen, wenn erkannt wird, dass die Pumpe trocken läuft, also der Wasservorrat erschöpft ist. Sie muss mit http:// oder https:// beginnen und vom Sensor aus erreichbar sein.\">");
-              client.println("					<td>Fehlermeldung an:</td>");
+              client.println("					<td>Wasser leer an:</td>");
               client.println("					<td><input name=\"emptyUrl\" maxlength=\"255\" size=\"40\" value=\"" + String(emptyWaterURL) + "\">&nbsp;</td>");
               client.println("					<td><a href=\"/E\">Test</a></td>");
               client.println("				</tr>");
@@ -723,6 +723,9 @@ void webServerReaction() {
               client.println("		<p>");
               client.println("			<a href=\"/H\">Feuchtewerte</a> &nbsp; <a href=\"/O\">Durchschnittsfeuchte</a> &nbsp; <a href=\"/P\">Pumpenwerte</a><br>");
               client.println("			<a href=\"/Dc\">DebugBodyFull</a> &nbsp; <a href=\"/Db\">DebugBodyPart</a> &nbsp; <a href=\"/JQ.js\">JQuery</a>");
+              client.println("		</p>");
+              client.println("		<p>");
+              client.println("		  <small><a href=\"https://github.com/Joghurt/Plantcare/\" target=\"_blank\">https://github.com/Joghurt/Plantcare/</a></small>");
               client.println("		</p>");
               client.println("	</td></tr></table>");
               client.println("</body>");
