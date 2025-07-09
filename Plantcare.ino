@@ -45,10 +45,12 @@ int sensorPort[] = { HUMIDITY_SENSOR_GPIO_NUMBERS };
 int sensorPortTotalNumber = sizeof(sensorPort) / sizeof(int);
 bool activeSensor[sizeof(sensorPort) / sizeof(int)];
 double averageHumidity[sizeof(sensorPort) / sizeof(int)];
+int sensorDryHumidity[sizeof(sensorPort) / sizeof(int)];
+int sensorWetHumidity[sizeof(sensorPort) / sizeof(int)];
 double overallAverageHumidity, lastOverallAverageHumidity;
 WiFiServer server(80);
 unsigned long startOfMainLoop, lastMillis60s, startPumpMillis, lastPumpRunStart;
-int page;
+int page, subpage;
 bool checkWifiConnectionFlag = true, humidityThresholdHysteresisFalling, serialDebug, serialDebugActive;
 String ssid, pwd, emptyWaterURL, reportURL;
 int humidityThreshold1, humidityThreshold2, pumpDelayInMinutes, dryWetPumpBorderValue;
@@ -83,6 +85,10 @@ void debugLineNumber(const unsigned int line) {
     Serial.println(line);
 }
 
+double mapf(const double x, const double in_min, const double in_max, const double out_min, const double out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
 void setup() {
   analogReadResolution(10);  // Backwards compatibility: 0-1023
   pinMode(LED_BUILTIN, OUTPUT);
@@ -92,19 +98,31 @@ void setup() {
 
   prefs.begin("p");
 
-  bool anySensorActive = false;
+  int numberOfActiveSensors = 0;
   overallAverageHumidity = 0;
   for (int v = 0; v < sensorPortTotalNumber; v++) {
-    averageHumidity[v] = analogRead(sensorPort[v]);  // Preload with current values
-    overallAverageHumidity += averageHumidity[v];    // TODO: Use percentage, not absolute values!
-    char portname[7];                                // gpioXX\0
+    char portname[10];  // gpioXX\0 gpiodryXX\0 gpiowetXX\0
     (String("gpio") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
     activeSensor[v] = prefs.getBool(portname);
-    if (activeSensor[v])
-      anySensorActive = true;
+    numberOfActiveSensors += (activeSensor[v] ? 1 : 0);
     debugln(String("GPIO") + sensorPort[v] + " is " + (activeSensor[v] ? " en" : "dis") + "abled for a humidity sensor");
+
+    (String("gpiodry") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
+    if (prefs.getInt(portname) == 0)
+      prefs.putInt(portname, 670);
+    sensorDryHumidity[v] = prefs.getInt(portname);
+
+    (String("gpiowet") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
+    if (prefs.getInt(portname) == 0)
+      prefs.putInt(portname, 260);
+    sensorWetHumidity[v] = prefs.getInt(portname);
+
+    if (activeSensor[v]) {
+      averageHumidity[v] = analogRead(sensorPort[v]);                                                          // Preload with current values
+      overallAverageHumidity += mapf(averageHumidity[v], sensorDryHumidity[v], sensorWetHumidity[v], 0, 100);  // TODO: Use percentage, not absolute values!
+    }
   }
-  overallAverageHumidity /= sensorPortTotalNumber;
+  overallAverageHumidity /= numberOfActiveSensors;
 
   ssid = prefs.getString("ssid");
   pwd = prefs.getString("password");
@@ -115,7 +133,7 @@ void setup() {
   dryWetPumpBorderValue = prefs.getInt("drypump");
   emptyWaterURL = prefs.getString("emptyUrl");
   reportURL = prefs.getString("reportURL");
-  if (!anySensorActive) {
+  if (numberOfActiveSensors == 0) {
     debugln("No GPIO enabled, activating first in line");
     char portname[7];  // gpioXX\0
     (String("gpio") + String(sensorPort[0])).toCharArray(portname, sizeof(portname));
@@ -123,11 +141,11 @@ void setup() {
     activeSensor[0] = prefs.getBool(portname);
   }
   if (humidityThreshold1 == 0) {  // Default values in case no Settings have been saved, yet
-    humidityThreshold1 = 78;      // Dry: ~673, Submerged: ~264 absolute, No sensor: 0, My plant: 380(71%)
+    humidityThreshold1 = 70;      // Dry: ~673, Submerged: ~264 absolute, No sensor: 0, My plant: 380(71%)
     prefs.putInt("threshold1", humidityThreshold1);
   }
   if (humidityThreshold2 == 0) {  // Default values in case no Settings have been saved, yet
-    humidityThreshold2 = 54;      // Dry: ~673, Submerged: ~264 absolute
+    humidityThreshold2 = 50;      // Dry: ~673, Submerged: ~264 absolute
     prefs.putInt("threshold2", humidityThreshold2);
   }
   if (isnan(pumpRuntimeInSeconds)) {
@@ -135,7 +153,7 @@ void setup() {
     prefs.putDouble("pumptime", pumpRuntimeInSeconds);
   }
   if (pumpDelayInMinutes == 0) {
-    pumpDelayInMinutes = 30;
+    pumpDelayInMinutes = 60;
     prefs.putInt("pumpdelay", pumpDelayInMinutes);
   }
   if (dryWetPumpBorderValue == 0) {
@@ -177,12 +195,11 @@ void loop() {
   for (int v = 0; v < sensorPortTotalNumber; v++) {
     if (activeSensor[v]) {
       averageHumidity[v] = averageHumidity[v] * .98 + analogRead(sensorPort[v]) * .02;
-      overallAverageHumidity += averageHumidity[v];  // TODO: Use percentage, not absolute values!
+      overallAverageHumidity += mapf(averageHumidity[v], sensorDryHumidity[v], sensorWetHumidity[v], 0, 100);  // TODO: Use percentage, not absolute values!
       sensorcount++;
     }
   }
   overallAverageHumidity /= sensorcount;
-  overallAverageHumidity = map(overallAverageHumidity, 673, 264, 0, 100);  // Translation to percent
 
   debugLineNumber(__LINE__);
 
@@ -462,11 +479,16 @@ void webServerReaction() {
         char c = client.read();
         if (c == '\n') {
           //debugln(currentLine); // DEBUG
-          if (currentLine.startsWith("GET /H")) {
+          if (currentLine.startsWith("GET /H?")) {
             //debugln(client.remoteIP().toString() + " -> Humidity value block  : " + currentLine);
             page = PAGE_HUMIDITYVAL;
+            subpage = currentLine.substring(strlen("GET /H?")).toInt();
+          } else if (currentLine.startsWith("GET /H")) {
+            //debugln(client.remoteIP().toString() + " -> Humidity all values block: " + currentLine);
+            page = PAGE_HUMIDITYVAL;
+            subpage = -1;
           } else if (currentLine.startsWith("GET /O")) {
-            //debugln(client.remoteIP().toString() + " -> Overall Humidity block: " + currentLine);
+            //debugln(client.remoteIP().toString() + " -> Average humidity block: " + currentLine);
             page = PAGE_HUMIDITY;
           } else if (currentLine.startsWith("GET /P")) {
             //debugln(client.remoteIP().toString() + " -> Pump current block    : " + currentLine);
@@ -492,73 +514,77 @@ void webServerReaction() {
           } else if (currentLine.startsWith("GET /Dc")) {
             //debugln(client.remoteIP().toString() + " -> Debug body (full)     : " + currentLine);
             page = PAGE_DEBUG_BODY_FULL;
-          } else if (currentLine.startsWith("GET /")) {
-            //debugln(client.remoteIP().toString() + " -> Default page          : " + currentLine);
-            if (currentLine.indexOf("?") != -1) {
-              for (int v = 0; v < sensorPortTotalNumber; v++) {
-                char portname[7];  // gpioXX\0
-                (String("gpio") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
-                activeSensor[v] = currentLine.indexOf(portname) != -1;
-                prefs.putBool(portname, activeSensor[v]);
-              }
-              serialDebug = currentLine.indexOf("serialDebug") != -1;
+          } else if (currentLine.startsWith("GET /?")) {
+            //debugln(client.remoteIP().toString() + " -> Default config page   : " + currentLine);
+            for (int v = 0; v < sensorPortTotalNumber; v++) {
+              char portname[10];  // gpioXX\0 gpiodryXX\0 gpiowetXX\0
+              (String("gpio") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
+              activeSensor[v] = currentLine.indexOf(portname) != -1;
+              prefs.putBool(portname, activeSensor[v]);
+
+              (String("gpiodry") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
+              sensorDryHumidity[v] = currentLine.substring(currentLine.indexOf(portname) + strlen(portname) + 1).toInt();
+              prefs.putInt(portname, sensorDryHumidity[v]);
+
+              (String("gpiowet") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
+              sensorWetHumidity[v] = currentLine.substring(currentLine.indexOf(portname) + strlen(portname) + 1).toInt();
+              prefs.putInt(portname, sensorWetHumidity[v]);
             }
-            if (currentLine.indexOf("threshold1") != -1) {
-              humidityThreshold1 = currentLine.substring(currentLine.indexOf("threshold1") + String("threshold1").length() + 1).toInt();
-              humidityThreshold1 = humidityThreshold1 < 1 ? 1 : (humidityThreshold1 > 99 ? 99 : humidityThreshold1);
-              prefs.putInt("threshold1", humidityThreshold1);
-            }
-            if (currentLine.indexOf("threshold2") != -1) {
-              humidityThreshold2 = currentLine.substring(currentLine.indexOf("threshold2") + String("threshold2").length() + 1).toInt();
-              humidityThreshold2 = humidityThreshold2 < 1 ? 1 : (humidityThreshold2 > 99 ? 99 : humidityThreshold2);
-              prefs.putInt("threshold2", humidityThreshold2);
-            }
-            if (currentLine.indexOf("pumptime") != -1) {
-              pumpRuntimeInSeconds = currentLine.substring(currentLine.indexOf("pumptime") + String("pumptime").length() + 1).toDouble();
-              pumpRuntimeInSeconds = pumpRuntimeInSeconds < 1 ? 1 : (pumpRuntimeInSeconds > 300 ? 300 : pumpRuntimeInSeconds);
-              prefs.putDouble("pumptime", pumpRuntimeInSeconds);
-            }
-            if (currentLine.indexOf("pumpdelay") != -1) {
-              pumpDelayInMinutes = currentLine.substring(currentLine.indexOf("pumpdelay") + String("pumpdelay").length() + 1).toInt();
-              pumpDelayInMinutes = pumpDelayInMinutes < 1 ? 1 : (pumpDelayInMinutes > 1440 ? 1440 : pumpDelayInMinutes);
-              prefs.putInt("pumpdelay", pumpDelayInMinutes);
-            }
-            if (currentLine.indexOf("drypump") != -1) {
-              dryWetPumpBorderValue = currentLine.substring(currentLine.indexOf("drypump") + String("drypump").length() + 1).toInt();
-              dryWetPumpBorderValue = dryWetPumpBorderValue < 1 ? 1 : (dryWetPumpBorderValue > 1022 ? 1022 : dryWetPumpBorderValue);
-              prefs.putInt("drypump", dryWetPumpBorderValue);
-            }
-            if (currentLine.indexOf("emptyUrl") != -1) {
-              const int start = currentLine.indexOf("emptyUrl") + String("emptyUrl").length() + 1;
-              int a = currentLine.indexOf("&", start);
-              int b = currentLine.indexOf(" ", start);
-              a = a == -1 ? 99999 : a;
-              b = b == -1 ? 99999 : b;
-              URLCode url;
-              url.urlcode = currentLine.substring(start, min(a, b));
-              url.urldecode();
-              emptyWaterURL = url.strcode;
-              prefs.putString("emptyUrl", emptyWaterURL);
-            }
-            if (currentLine.indexOf("reportURL") != -1) {
-              const int start = currentLine.indexOf("reportURL") + String("reportURL").length() + 1;
-              int a = currentLine.indexOf("&", start);
-              int b = currentLine.indexOf(" ", start);
-              a = a == -1 ? 99999 : a;
-              b = b == -1 ? 99999 : b;
-              URLCode url;
-              url.urlcode = currentLine.substring(start, min(a, b));
-              url.urldecode();
-              reportURL = url.strcode;
-              prefs.putString("reportURL", reportURL);
-            }
+
+            serialDebug = currentLine.indexOf("serialDebug") != -1;
+
+            humidityThreshold1 = currentLine.substring(currentLine.indexOf("threshold1") + String("threshold1").length() + 1).toInt();
+            humidityThreshold1 = humidityThreshold1 < 1 ? 1 : (humidityThreshold1 > 99 ? 99 : humidityThreshold1);
+            prefs.putInt("threshold1", humidityThreshold1);
+
+            humidityThreshold2 = currentLine.substring(currentLine.indexOf("threshold2") + String("threshold2").length() + 1).toInt();
+            humidityThreshold2 = humidityThreshold2 < 1 ? 1 : (humidityThreshold2 > 99 ? 99 : humidityThreshold2);
+            prefs.putInt("threshold2", humidityThreshold2);
+
+            pumpRuntimeInSeconds = currentLine.substring(currentLine.indexOf("pumptime") + String("pumptime").length() + 1).toDouble();
+            pumpRuntimeInSeconds = pumpRuntimeInSeconds < 1 ? 1 : (pumpRuntimeInSeconds > 300 ? 300 : pumpRuntimeInSeconds);
+            prefs.putDouble("pumptime", pumpRuntimeInSeconds);
+
+            pumpDelayInMinutes = currentLine.substring(currentLine.indexOf("pumpdelay") + String("pumpdelay").length() + 1).toInt();
+            pumpDelayInMinutes = pumpDelayInMinutes < 1 ? 1 : (pumpDelayInMinutes > 1440 ? 1440 : pumpDelayInMinutes);
+            prefs.putInt("pumpdelay", pumpDelayInMinutes);
+
+            dryWetPumpBorderValue = currentLine.substring(currentLine.indexOf("drypump") + String("drypump").length() + 1).toInt();
+            dryWetPumpBorderValue = dryWetPumpBorderValue < 1 ? 1 : (dryWetPumpBorderValue > 1022 ? 1022 : dryWetPumpBorderValue);
+            prefs.putInt("drypump", dryWetPumpBorderValue);
+
+            int start, a, b;
+            URLCode url;
+
+            start = currentLine.indexOf("emptyUrl") + String("emptyUrl").length() + 1;
+            a = currentLine.indexOf("&", start);
+            b = currentLine.indexOf(" ", start);
+            a = a == -1 ? 99999 : a;
+            b = b == -1 ? 99999 : b;
+            url.urlcode = currentLine.substring(start, min(a, b));
+            url.urldecode();
+            emptyWaterURL = url.strcode;
+            prefs.putString("emptyUrl", emptyWaterURL);
+
+            start = currentLine.indexOf("reportURL") + String("reportURL").length() + 1;
+            a = currentLine.indexOf("&", start);
+            b = currentLine.indexOf(" ", start);
+            a = a == -1 ? 99999 : a;
+            b = b == -1 ? 99999 : b;
+            url.urlcode = currentLine.substring(start, min(a, b));
+            url.urldecode();
+            reportURL = url.strcode;
+            prefs.putString("reportURL", reportURL);
           }
           if (currentLine.length() == 0) {
             client.println("HTTP/1.1 200 OK");
             if (page == PAGE_HUMIDITYVAL) {
               client.println("Content-type:application/json;charset=utf-8");
               client.println();
-              client.println(getAvgValues());
+              if (subpage >= 0 && subpage < sensorPortTotalNumber)
+                client.println(averageHumidity[subpage]);
+              else
+                client.println(getAvgValues());
             } else if (page == PAGE_HUMIDITY) {
               client.println("Content-type:application/json;charset=utf-8");
               client.println();
@@ -606,58 +632,104 @@ void webServerReaction() {
             } else {
               client.println("Content-type:text/html;charset=utf-8");
               client.println();
-              client.println("<html><head><script src=\"JQ.js\"></script><script>function go(){$(\"#hd\").load(\"/H\");$(\"#ho\").load(\"/O\");$(\"#pc\").load(\"/P\");setTimeout(go,1000)}$(document).ready(go)</script></head><body>");
-              client.println("<form action=\"/\"><table>");
-              client.print("<tr><td>Nutze Sensor am GPIO:</td><td>");
+              client.println("<html>");
+              client.println("<head>");
+              client.println("	<script src=\"JQ.js\"></script>");
+              client.println("	<script>");
+              client.println("		function a() {");
+              client.println("			$(\"#pc\").load(\"/P\");");
+              client.println("			setTimeout(a,1000);");
+              client.println("		}");
+              client.println("		function b() {");
+              client.println("			$(\"#ho\").load(\"/O\");");
               for (int v = 0; v < sensorPortTotalNumber; v++) {
-                client.print(sensorPort[v]);
-                client.print("<input type=\"checkbox\" name=\"gpio");
-                client.print(sensorPort[v]);
-                client.print("\" value=\"1\"");
-                if (activeSensor[v])
-                  client.print(" checked");
-                client.print("> ");
+                client.println("			$(\"#h" + String(sensorPort[v]) + "\").load(\"/H?" + String(v) + "\");");
               }
-              client.println("</td><td><span id=\"hd\">[]</span></td></tr>");
-              client.print("<tr title=\"Bei überschreiten dieser prozentualen Feuchte wird das zyklische Pumpen zur Schimmelvermeidung deaktiviert.\"><td>Feuchteschwellwert 1:</td><td><input name=\"threshold1\" size=\"10\" value=\"");
-              client.print(humidityThreshold1);
-              client.println("\">&nbsp;(Aktuell: <span id=\"ho\">[]</span> %)</td></tr>");
-              client.print("<tr><td title=\"Bei unterschreiten dieser prozentualen Feuchte wird das zyklische Pumpen wieder aktiviert.\">Feuchteschwellwert 2:</td><td><input name=\"threshold2\" size=\"10\" value=\"");
-              client.print(humidityThreshold2);
-              client.print("\"></td><td title=\"Debugging auf die serielle Schnittstelle mit 115200 Baud.\"><input type=\"checkbox\" name=\"serialDebug\"");
-              if (serialDebug)
-                client.print(" checked");
-              client.println("> Serial Debug</td></tr>");
-              client.print("<tr title=\"Pumpenlaufzeit in Sekunden bei Erreichen des Feuchteschwellwerts oder beim Pumpentest.\"><td>Pumpenlaufzeit:</td><td><input name=\"pumptime\" size=\"10\" value=\"");
-              client.print(pumpRuntimeInSeconds);
-              client.println("\">&nbsp;s<td></td></tr>");
-              client.print("<tr title=\"Mindestpause zwischen zwei Pumpstößen in Minuten.\"><td>Pumpenpause:</td><td><input name=\"pumpdelay\" size=\"10\" value=\"");
-              client.print(pumpDelayInMinutes);
-              client.println("\">&nbsp;m<td></td></tr>");
-              client.print("<tr title=\"Der eingetragene Wert muss zwischen dem angezeigten Wert bei laufender Pumpe bei vollem Wassertank und bei leerem Wassertank liegen. "
-                           "Tipp: Der Wert für den jeweiligen Durchgang wird im Debug Log ausgegeben.\"><td>Wasserstandserkennung:</td><td><input name=\"drypump\" size=\"10\" value=\"");
-              client.print(dryWetPumpBorderValue);
-              client.println("\">&nbsp;(Aktuell: <span id=\"pc\">0</span> mA)</td><td><a href=\"/T\">Test</a></td></tr>");
-              client.print("<tr title=\"Diese URL wird aufgerufen, wenn erkannt wird, dass die Pumpe trocken läuft, also der Wasservorrat erschöpft ist. Sie muss mit http:// oder https:// "
-                           "beginnen und vom Sensor aus erreichbar sein.\"><td>Fehlermeldung an:</td><td><input name=\"emptyUrl\" maxlength=\"255\" size=\"60\" value=\"");
-              client.print(emptyWaterURL);
-              client.println("\">&nbsp;</td><td><a href=\"/E\">Test</a></td></tr>");
-              client.print("<tr title=\"Diese URL wird zyklisch mit den aktuellen Feuchtewerten aufgerufen. Sie muss mit http:// oder https:// beginnen und vom Sensor aus erreichbar sein.\">"
-                           "<td>Statusreports an:</td><td><input name=\"reportURL\" maxlength=\"255\" size=\"60\" value=\"");
-              client.print(reportURL);
-              client.println("\">&nbsp;</td><td><a href=\"/R\">Test</a></td></tr>");
-              client.println("<tr><td colspan=\"2\" align=\"center\"><input type=\"submit\" value=\"speichern\"></td><td><a href=\"/Da\">Debug</a></td></tr>");
-              client.println("</table></form>");
-              client.println("<a href=\"/H\">Feuchtewerte</a>");
-              client.println("<a href=\"/O\">Durchschnittsfeuchte</a>");
-              client.println("<a href=\"/P\">Pumpenwerte</a>");
-              client.println("<a href=\"/Dc\">DebugBodyFull</a>");
-              client.println("<a href=\"/Db\">DebugBodyPart</a>");
-              client.println("<a href=\"/JQ.js\">JQuery</a>");
-              client.println("</body></html>");
+              client.println("			setTimeout(b,10000);");
+              client.println("		}");
+              client.println("		$(document).ready(function(){a();b()});");
+              client.println("	</script>");
+              client.println("	<style>");
+              client.println("		body {");
+              client.println("			font-family:Arial,Helvetica,sans-serif;");
+              client.println("			background:#ddd;");
+              client.println("		}");
+              client.println("	</style>");
+              client.println("</head>");
+              client.println("<body>");
+              client.println("	<table width=\"100%\" height=\"100%\"><tr align=\"center\"><td>");
+              client.println("		<form action=\"/\">");
+              client.println("			<table>");
+              client.println("				<tr>");
+              client.println("					<th>Sensor an</th>");
+              client.println("					<th>Aktiv</th>");
+              client.println("					<th title=\"Sensorwert an der freien Luft\">Trocken</th>");
+              client.println("					<th title=\"Sensorwert im Wasserglas\">Nass</th>");
+              client.println("					<th>Aktuell</th>");
+              client.println("				</tr>");
+              for (int v = 0; v < sensorPortTotalNumber; v++) {
+                client.println("				<tr align=\"center\">");
+                client.println("					<td>GPIO " + String(sensorPort[v]) + "</td>");
+                client.println("					<td><input type=\"checkbox\" name=\"gpio" + String(sensorPort[v]) + "\" value=\"1\"" + String(activeSensor[v] ? " checked" : "") + "></td>");
+                client.println("					<td title=\"Sensorwert an der freien Luft\"><input name=\"gpiodry" + String(sensorPort[v]) + "\" size=\"5\" value=\"" + String(sensorDryHumidity[v]) + "\"></td>");
+                client.println("					<td title=\"Sensorwert im Wasserglas\"><input name=\"gpiowet" + String(sensorPort[v]) + "\" size=\"5\" value=\"" + String(sensorWetHumidity[v]) + "\"></td>");
+                client.println("					<td><span id=\"h" + String(sensorPort[v]) + "\">X</span></td>");
+                client.println("				</tr>");
+              }
+              client.println("			</table>");
+              client.println("			<br>");
+              client.println("			<table>");
+              client.println("				<tr title=\"Bei überschreiten dieser prozentualen Feuchte wird das zyklische Pumpen zur Schimmelvermeidung deaktiviert.\">");
+              client.println("					<td>Feuchteschwellwert 1:</td>");
+              client.println("					<td><input name=\"threshold1\" size=\"5\" value=\"" + String(humidityThreshold1) + "\">&nbsp;% &nbsp; (Aktuell: <span id=\"ho\">X</span> %)</td>");
+              client.println("				</tr>");
+              client.println("				<tr>");
+              client.println("					<td title=\"Bei unterschreiten dieser prozentualen Feuchte wird das zyklische Pumpen wieder aktiviert bis der Feuchteschwellwert 1 erreicht ist.\">Feuchteschwellwert 2:</td>");
+              client.println("					<td><input name=\"threshold2\" size=\"5\" value=\"" + String(humidityThreshold2) + "\">&nbsp;%</td>");
+              client.println("				</tr>");
+              client.println("				<tr title=\"Pumpenlaufzeit in Sekunden bei Erreichen des Feuchteschwellwerts oder beim Pumpentest.\">");
+              client.println("					<td>Pumpenlaufzeit:</td>");
+              client.println("					<td><input name=\"pumptime\" size=\"5\" value=\"" + String(pumpRuntimeInSeconds) + "\">&nbsp;s</td>");
+              client.println("				</tr>");
+              client.println("				<tr title=\"Mindestpause zwischen zwei Pumpstößen in Minuten.\">");
+              client.println("					<td>Pumpenpause:</td>");
+              client.println("					<td><input name=\"pumpdelay\" size=\"5\" value=\"" + String(pumpDelayInMinutes) + "\">&nbsp;m</td>");
+              client.println("				</tr>");
+              client.println("				<tr title=\"Der eingetragene Wert muss zwischen dem angezeigten Wert bei laufender Pumpe bei vollem Wassertank und bei leerem Wassertank liegen. Tipp: Der Wert für den jeweiligen Durchgang wird im Debug Log ausgegeben.\">");
+              client.println("					<td>Wasserstandserkennung:</td>");
+              client.println("					<td><input name=\"drypump\" size=\"5\" value=\"" + String(dryWetPumpBorderValue) + "\">&nbsp;mA &nbsp; (Aktuell: <span id=\"pc\">X</span> mA)</td>");
+              client.println("					<td><a href=\"/T\">Test</a></td>");
+              client.println("				</tr>");
+              client.println("				<tr title=\"Diese URL wird aufgerufen, wenn erkannt wird, dass die Pumpe trocken läuft, also der Wasservorrat erschöpft ist. Sie muss mit http:// oder https:// beginnen und vom Sensor aus erreichbar sein.\">");
+              client.println("					<td>Fehlermeldung an:</td>");
+              client.println("					<td><input name=\"emptyUrl\" maxlength=\"255\" size=\"40\" value=\"" + String(emptyWaterURL) + "\">&nbsp;</td>");
+              client.println("					<td><a href=\"/E\">Test</a></td>");
+              client.println("				</tr>");
+              client.println("				<tr title=\"Diese URL wird zyklisch mit den aktuellen Feuchtewerten aufgerufen. Sie muss mit http:// oder https:// beginnen und vom Sensor aus erreichbar sein.\">");
+              client.println("					<td>Statusreports an:</td>");
+              client.println("					<td><input name=\"reportURL\" maxlength=\"255\" size=\"40\" value=\"" + String(reportURL) + "\">&nbsp;</td>");
+              client.println("					<td><a href=\"/R\">Test</a></td>");
+              client.println("				</tr>");
+              client.println("				<tr title=\"Debugging auf die serielle Schnittstelle mit 115200 Baud.\">");
+              client.println("					<td>Serial Debug</td>");
+              client.println("					<td><input type=\"checkbox\" name=\"serialDebug\"" + String(serialDebug ? " checked" : "") + "></td>");
+              client.println("				</tr>");
+              client.println("				<tr>");
+              client.println("					<td colspan=\"2\" align=\"center\"><input type=\"submit\" value=\"speichern\"></td>");
+              client.println("					<td><a href=\"/Da\">Debug</a></td>");
+              client.println("				</tr>");
+              client.println("			</table>");
+              client.println("		</form>");
+              client.println("		<p>");
+              client.println("			<a href=\"/H\">Feuchtewerte</a> &nbsp; <a href=\"/O\">Durchschnittsfeuchte</a> &nbsp; <a href=\"/P\">Pumpenwerte</a><br>");
+              client.println("			<a href=\"/Dc\">DebugBodyFull</a> &nbsp; <a href=\"/Db\">DebugBodyPart</a> &nbsp; <a href=\"/JQ.js\">JQuery</a>");
+              client.println("		</p>");
+              client.println("	</td></tr></table>");
+              client.println("</body>");
+              client.println("</html>");
             }
             page = PAGE_DEFAULT;
-            break;
+            break;  // Exit while() loop
           } else {
             currentLine = "";
           }
