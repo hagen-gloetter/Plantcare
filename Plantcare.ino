@@ -10,6 +10,8 @@
 //  Sensor https://github.com/OgreTransporter/fritzing-parts-extra/
 //  Relais https://forum.fritzing.org/t/kf-301-relay-request/7992/10
 
+#define LED_BUILTIN 2
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wps.h>
@@ -22,7 +24,7 @@
 #define PUMP_ACTIVE_GPIO_NUMBER 33
 #define PUMP_CURRENT_GPIO_NUMBER 36
 
-#define PUMP_CURRENT_MULTIPLIER 2.8
+#define PUMP_CURRENT_MULTIPLIER 0.9
 
 #define PAGE_DEFAULT 0
 #define PAGE_HUMIDITYVAL 1
@@ -79,8 +81,8 @@ template<typename... Args> void debugln(Args... args) {
     debugBufferIndexLastShown = (debugBufferIndexLastShown + 1) % DEBUG_BUFFER_SIZE;
 }
 void debugLineNumber(const unsigned int line) {
-  if (serialDebug)
-    Serial.println(line);
+//  if (serialDebug)
+//    Serial.println(line);
 }
 
 void setup() {
@@ -89,6 +91,11 @@ void setup() {
 
   pinMode(PUMP_ACTIVE_GPIO_NUMBER, OUTPUT);
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, HIGH);  // The used relais is LOW active!
+
+  if (serialDebug && !serialDebugActive) {  // Only initialize once
+    Serial.begin(115200);
+    serialDebugActive = true;
+  }
 
   prefs.begin("p");
 
@@ -209,7 +216,7 @@ void loop() {
   currentMillis = millis();
   if (lastOverallAverageHumidity != overallAverageHumidity && currentMillis - startOfMainLoop > 5000) {  // Only after average warmup
     debugLineNumber(__LINE__);
-    doStatusReporting();
+    //doStatusReporting();
     lastOverallAverageHumidity = overallAverageHumidity;
   }
 
