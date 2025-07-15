@@ -51,16 +51,31 @@
 				},
 			},
 			data: {
+<?	require_once "db.php";
+	$row = db_query("SELECT c1.Value AS Upper, c2.Value AS Lower FROM Config c1 INNER JOIN Config c2 ON c2.Id='Threshold2' WHERE c1.Id='Threshold1'")->fetch_assoc();
+	$row2 = db_query("SELECT MIN(Date) AS Start, MAX(Date) AS End FROM Humidity WHERE Date > SUBDATE(NOW(), 8) ORDER BY Id")->fetch_assoc();
+?>
 				datasets: [{
+						label: 'Upper Threshold',
+						data: [
+							{t:'<?=$row2['Start']?>', y:<?=$row['Upper']?>},
+							{t:'<?=$row2['End']?>', y:<?=$row['Upper']?>}
+						],
+						borderColor: 'rgba(255, 0, 0, .5)',
+					}, {
+						label: 'Lower Threshold',
+						data: [
+							{t:'<?=$row2['Start']?>', y:<?=$row['Lower']?>},
+							{t:'<?=$row2['End']?>', y:<?=$row['Lower']?>}
+						],
+						borderColor: 'rgba(0, 0, 255, .5)',
+					}, {
 					tension: .3,
-					fill: false,
 					pointRadius: 1.5,
 					label: 'Humidity Values',
 					data: [
-<?php
-	require_once "db.php";
-	foreach (db_query("SELECT Date, Average FROM Humidity ORDER BY Id", true)->fetch_all() AS $x) { ?>
-						{t: '<?=$x[0]?>',y: <?=$x[1]?>},
+<?	foreach (db_query("SELECT Date, Average FROM Humidity WHERE Date > SUBDATE(NOW(), 8) ORDER BY Id")->fetch_all() AS $x) { ?>
+						{t:'<?=$x[0]?>', y:<?=$x[1]?>},
 <?	} ?>
 					],
 					borderColor: 'rgba(0, 255, 0, 1)',
