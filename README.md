@@ -2,7 +2,7 @@
 * It will call a website of your choice when the water tank is empty so you can do whatever you want with the information like send yourself an e-mail or use MQTT or whatnot.
 * It will call another website of your choice with the current humidity value as it changes so you can keep track of the humidity of your plant.
 * Supports up to three humidity sensors and uses their average value for big pots.
-* Automatically uses Push button WPS ( https://en.wikipedia.org/wiki/Wi-Fi_Protected_Setup ) after 20 seconds of not being able to connect to any Wifi network on ESP32 startup, e.g. on first use.
+* Automatically switches to Push button WPS ( https://en.wikipedia.org/wiki/Wi-Fi_Protected_Setup ) within 40 seconds of not being able to connect to any Wifi network on cold start, e.g. on first use.
 
 ## Necessary Hardware
 To build this you need an ESP32 (e.g. https://www.amazon.de/dp/B0D9LFM1MG ) as well as a humidity sensor, relais and pump (e.g. https://www.amazon.de/dp/B0814HXWVV ), a 3.9 Ohm resistor, a 47uF capacitor and maybe additional sensors (e.g. https://www.amazon.de/dp/B08GCRZVSR ). Also get a large USB power adapter that ideally uses USB-C and a good cable.
