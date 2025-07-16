@@ -1,22 +1,32 @@
-// Needs Boards
-//	"esp32 by Espressif Systems" https://github.com/espressif/arduino-esp32
-// Needs Libraries
-//	"URLCode by XieXuan"				 https://github.com/MR-XieXuan/URLCode_for_Arduino
-//	"incbin by Dale Weiler"			https://github.com/AlexIII/incbin-arduino
-// Tested on
-//	"WEMOS D1 MINI ESP32"
-// Fritzing parts
-//	ESP32	https://forum.fritzing.org/t/doit-esp32-devkit-v1-30-pin/8443/3
-//	Sensor https://github.com/OgreTransporter/fritzing-parts-extra/
-//	Relais https://forum.fritzing.org/t/kf-301-relay-request/7992/10
-
+/* ---------------------------------------------------------------------------
+ * Needs Boards
+ *	"esp32 by Espressif Systems" https://github.com/espressif/arduino-esp32
+ * Needs Libraries
+ *	"URLCode by XieXuan" https://github.com/MR-XieXuan/URLCode_for_Arduino
+ *	"incbin by Dale Weiler" https://github.com/AlexIII/incbin-arduino
+ * Tested on
+ *	"WEMOS D1 MINI ESP32"
+ * Fritzing parts
+ *	ESP32 https://forum.fritzing.org/t/doit-esp32-devkit-v1-30-pin/8443/3
+ *	Sensor https://github.com/OgreTransporter/fritzing-parts-extra/
+ *	Relais https://forum.fritzing.org/t/kf-301-relay-request/7992/10
+ * ------------------------------------------------------------------------ */
 #include <Arduino.h>
-#include <WiFi.h>
 #include <esp_wps.h>
 #include <HTTPClient.h>
+#include <incbin.h>
 #include <Preferences.h>
 #include <URLCode.h>
-#include <incbin.h>
+#include <WiFi.h>
+/* ---------------------------------------------------------------------------
+ * Edit ssid and password or use Button WPS! If you want to use a fixed ssid
+ * and password because you can't reach your router or it doesn't support WPS
+ * edit them in "ssidAndPassword.h". Also you can always use WPS (push button)
+ * mode, which the ESP will automatically switch to, in case it can't connect
+ * to the given wifi, within 40 seconds after cold start, recognizable by a
+ * LED light constantly shining until the connection is successful. */
+#include "ssidAndPassword.h"
+/* ------------------------------------------------------------------------ */
 
 #define HUMIDITY_SENSOR_GPIO_NUMBERS 34, 35, 39
 #define PUMP_ACTIVE_GPIO_NUMBER 33
@@ -56,7 +66,7 @@ int sensorDryHumidity[sizeof(sensorPort) / sizeof(int)];
 int sensorWetHumidity[sizeof(sensorPort) / sizeof(int)];
 double overallAverageHumidity, lastOverallAverageHumidity;
 WiFiServer server(80);
-unsigned long startOfMainLoop, lastMillis60s, startPumpMillis, lastPumpRunStart;
+unsigned long startOfMainLoopMillis, lastMillis60s, startPumpMillis, lastPumpStartMillis, refreshPagesMillis;
 int page, subpage;
 bool checkWifiConnectionFlag = true, humidityThresholdHysteresisFalling, serialDebug, serialDebugActive;
 String ssid, pwd, emptyWaterURL, reportURL;
@@ -69,20 +79,43 @@ String debugBufferLine;
 int debugBufferIndexNextEmpty, debugBufferIndexLastShown, debugLevel;
 
 // Variadic template functions
-template<typename... Args> void debug(const unsigned int level, Args... args) {
+template<typename... Args> void debug(const int level, Args... args) {
   if (serialDebug)
     Serial.print(args...);
   if (level <= debugLevel)
     (debugBufferLine += String(args), ...);
 }
-template<typename... Args> void debugln(const unsigned int level, Args... args) {
+template<typename... Args> void debugln(const int level, Args... args) {
   if (serialDebug)
     Serial.println(args...);
   if (level <= debugLevel) {
     (debugBufferLine += String(args), ...);
     unsigned long now = (millis() + 500) / 1000;  // Seconds
     int d = now / 86400, h = (now / 3600) % 24, m = (now / 60) % 60, s = now % 60;
-    debugBufferArray[debugBufferIndexNextEmpty] = String(d) + ":" + String(h < 10 ? "0" + String(h) : h) + ":" + String(m < 10 ? "0" + String(m) : m) + ":" + String(s < 10 ? "0" + String(s) : s) + " - " + debugBufferLine;
+    char sign;
+    switch (level) {
+      case DEBUG_ERROR:
+        sign = 'E';
+        break;
+      case DEBUG_WARN:
+        sign = 'W';
+        break;
+      case DEBUG_INFO:
+        sign = 'I';
+        break;
+      case DEBUG_VERBOSE:
+        sign = 'V';
+        break;
+      case DEBUG_DEBUG:
+        sign = 'D';
+        break;
+      case DEBUG_TRACE:
+        sign = 'T';
+        break;
+      default:
+        sign = '?';
+    }
+    debugBufferArray[debugBufferIndexNextEmpty] = String(d) + ":" + String(h < 10 ? "0" + String(h) : h) + ":" + String(m < 10 ? "0" + String(m) : m) + ":" + String(s < 10 ? "0" + String(s) : s) + " [" + sign + "] " + debugBufferLine;
     debugBufferLine = "";
     debugBufferIndexNextEmpty = (debugBufferIndexNextEmpty + 1) % DEBUG_BUFFER_SIZE;
     if (debugBufferIndexLastShown == debugBufferIndexNextEmpty)  // If circular buffer is full release oldest entry
@@ -123,7 +156,10 @@ void setup() {
     sensorWetHumidity[v] = prefs.getInt(portname);
 
     if (activeSensor[v]) {
-      averageHumidity[v] = analogRead(sensorPort[v]);  // Preload with current values
+      for (int t = 0; t < 20; t++) {
+        averageHumidity[v] = analogRead(sensorPort[v]);  // Preload with current values
+        delay(5);
+      }
       overallAverageHumidity += mapf(averageHumidity[v], sensorDryHumidity[v], sensorWetHumidity[v], 0, 100);
     }
   }
@@ -187,8 +223,8 @@ void setup() {
 }
 
 void loop() {
-  if (startOfMainLoop == 0)
-    startOfMainLoop = millis();  // For averaging stuff warmup phase
+  if (startOfMainLoopMillis == 0)
+    startOfMainLoopMillis = millis();  // For averaging stuff warmup phase
 
   if (serialDebug && !serialDebugActive) {  // Only initialize once
     Serial.begin(115200);
@@ -214,7 +250,7 @@ void loop() {
 
   unsigned long currentMillis = millis();
   // Pump mode hysteresis for mold prevention - only check for switching down after pump cooldown!
-  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThreshold1 && (lastPumpRunStart == 0 || currentMillis > lastPumpRunStart + pumpDelayInMinutes * 60000)) {
+  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThreshold1 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + pumpDelayInMinutes * 60000)) {
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is above upper threshold (" + String(humidityThreshold1) + "), switching to falling mode");
     humidityThresholdHysteresisFalling = true;
@@ -225,7 +261,7 @@ void loop() {
   }
 
   currentMillis = millis();
-  if (abs(lastOverallAverageHumidity - overallAverageHumidity) >= .5 && currentMillis - startOfMainLoop > 5000) {  // Only after average warmup
+  if (abs(lastOverallAverageHumidity - overallAverageHumidity) >= .5 && currentMillis - startOfMainLoopMillis > 5000) {  // Only after average warmup
     debugln(DEBUG_TRACE, __LINE__);
     doStatusReporting();
     lastOverallAverageHumidity = overallAverageHumidity;
@@ -243,7 +279,7 @@ void loop() {
   }
 
   currentMillis = millis();
-  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold1 && currentMillis - startOfMainLoop > 5000 && (lastPumpRunStart == 0 || currentMillis > lastPumpRunStart + pumpDelayInMinutes * 60000)) {  // Only after average warmup
+  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold1 && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + pumpDelayInMinutes * 60000)) {  // Only after average warmup
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is lower than upper threshold (" + String(humidityThreshold1) + "), starting pump");
     startPump();
@@ -267,10 +303,13 @@ void loop() {
     }
   }
 
-  for (int t = 0; t < 30; t++)
+  for (int t = 0; t < 20; t++) {
     currentPumpCurrentValue = currentPumpCurrentValue * .99 + (analogRead(PUMP_CURRENT_GPIO_NUMBER) * PUMP_CURRENT_MULTIPLIER) * .01;
+    delay(1);
+  }
 
-  delay(100);
+  currentMillis = millis();
+  delay(startPumpMillis == 0 && currentMillis - refreshPagesMillis > 5000 ? 2000 : 2);  // React quickly on startup and page load as well as when pump is running
 }
 
 void doEmptyWaterWarning() {
@@ -329,7 +368,7 @@ void startPump() {
   debugln(DEBUG_INFO, "Starting Pump");
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, LOW);
   startPumpMillis = millis();
-  lastPumpRunStart = startPumpMillis;
+  lastPumpStartMillis = startPumpMillis;
 }
 
 void stopPump() {
@@ -339,17 +378,37 @@ void stopPump() {
 }
 
 bool connectToWiFi() {
-  debugln(DEBUG_INFO, "Connecting to SSID: " + ssid);
-
-  WiFi.begin(ssid, pwd);
-
-  for (int t = 0; t < 20; t++) {  // Try for 20 seconds
-    if (WiFi.status() == WL_CONNECTED)
-      break;
-    delay(1000);
-    debug(DEBUG_INFO, ".");
+  // Try the stored values for ssid and password, if any
+  if (ssid != NULL && pwd != NULL) {
+    debugln(DEBUG_INFO, "Connecting to SSID: " + ssid);
+    WiFi.begin(ssid, pwd);
+    for (int t = 0; t < 20; t++) {  // Try for 20 seconds
+      if (WiFi.status() == WL_CONNECTED)
+        break;
+      delay(1000);
+      debug(DEBUG_INFO, ".");
+    }
+    debugln(DEBUG_INFO);
   }
-  debugln(DEBUG_INFO);
+
+  // Try the values from the "ssidAndPassword.h" file
+  if (WiFi.status() != WL_CONNECTED) {
+    debugln(DEBUG_INFO, "Connecting to SSID: " + wifiName);
+    WiFi.begin(wifiName, wifiPassword);
+    for (int t = 0; t < 20; t++) {  // Try for 20 seconds
+      if (WiFi.status() == WL_CONNECTED) {
+        ssid = wifiName;
+        prefs.putString("ssid", ssid);
+        pwd = wifiPassword;
+        prefs.putString("password", pwd);
+        break;
+      }
+      delay(1000);
+      debug(DEBUG_INFO, ".");
+    }
+    debugln(DEBUG_INFO);
+  }
+
   if (WiFi.status() == WL_CONNECTED) {
     digitalWrite(LED_BUILTIN, HIGH);
     debugln(DEBUG_VERBOSE, "Success: " + WiFi.localIP().toString());
@@ -498,6 +557,7 @@ void webServerReaction() {
           } else if (currentLine.startsWith("GET /Da")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Debug main page: " + currentLine);
             page = PAGE_DEBUG;
+            refreshPagesMillis = millis();
           } else if (currentLine.startsWith("GET /Db")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Debug body (part): " + currentLine);
             page = PAGE_DEBUG_BODY_PART;
@@ -505,7 +565,7 @@ void webServerReaction() {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Debug body (full): " + currentLine);
             page = PAGE_DEBUG_BODY_FULL;
           } else if (currentLine.startsWith("GET /?")) {
-            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Default config page: " + currentLine);
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Saving default config page: " + currentLine);
             for (int v = 0; v < sensorPortTotalNumber; v++) {
               char portname[10];  // gpioXX\0 gpiodryXX\0 gpiowetXX\0
               (String("gpio") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
@@ -519,6 +579,8 @@ void webServerReaction() {
               (String("gpiowet") + String(sensorPort[v])).toCharArray(portname, sizeof(portname));
               sensorWetHumidity[v] = currentLine.substring(currentLine.indexOf(portname) + strlen(portname) + 1).toInt();
               prefs.putInt(portname, sensorWetHumidity[v]);
+
+              refreshPagesMillis = millis();
             }
 
             humidityThreshold1 = currentLine.substring(currentLine.indexOf("threshold1") + String("threshold1").length() + 1).toInt();
@@ -569,6 +631,9 @@ void webServerReaction() {
             prefs.putInt("debugLevel", debugLevel);
 
             serialDebug = currentLine.indexOf("serialDebug") != -1;
+          } else {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Default config page: " + currentLine);
+            refreshPagesMillis = millis();  // Clean main page
           }
           if (currentLine.length() == 0) {
             client.println("HTTP/1.1 200 OK");
