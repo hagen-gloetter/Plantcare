@@ -16,6 +16,7 @@
 #include <HTTPClient.h>
 #include <incbin.h>
 #include <Preferences.h>
+#include <time.h>
 #include <URLCode.h>
 #include <WiFi.h>
 /* ---------------------------------------------------------------------------
@@ -32,7 +33,16 @@
 #define PUMP_ACTIVE_GPIO_NUMBER 33
 #define PUMP_CURRENT_GPIO_NUMBER 36
 
+#define NTP_SERVER "pool.ntp.org"
+#define NTP_GMT_OFFSET_SEC 3600
+#define NTP_DAYLIGHT_OFFSET_SEC 3600
+
 #define PUMP_CURRENT_MULTIPLIER 2.8
+
+#define DEFAULT_URL_EMPTY "https://my.domain.net/empty.php"
+#define DEFAULT_URL_STATUS "https://my.domain.net/status.php"
+
+// ---------------------------------------------------------------------------
 
 #define PAGE_DEFAULT 0
 #define PAGE_HUMIDITYVAL 1
@@ -49,9 +59,6 @@
 #define DEBUG_VERBOSE 4
 #define DEBUG_DEBUG 5
 #define DEBUG_TRACE 6
-
-#define DEFAULT_URL_EMPTY "https://my.domain.net/empty.php"
-#define DEFAULT_URL_STATUS "https://my.domain.net/status.php"
 
 INCTXT(JQuery, "jquery-3.7.1.min.js");  // -> gJQueryData , see https://github.com/AlexIII/incbin-arduino
 
@@ -90,8 +97,6 @@ template<typename... Args> void debugln(const int level, Args... args) {
     Serial.println(args...);
   if (level <= debugLevel) {
     (debugBufferLine += String(args), ...);
-    unsigned long now = (millis() + 500) / 1000;  // Seconds
-    int d = now / 86400, h = (now / 3600) % 24, m = (now / 60) % 60, s = now % 60;
     char sign;
     switch (level) {
       case DEBUG_ERROR:
@@ -115,9 +120,17 @@ template<typename... Args> void debugln(const int level, Args... args) {
       default:
         sign = '?';
     }
-    debugBufferArray[debugBufferIndexNextEmpty] = String(d) + ":" + String(h < 10 ? "0" + String(h) : h) + ":" + String(m < 10 ? "0" + String(m) : m) + ":" + String(s < 10 ? "0" + String(s) : s) + " [" + sign + "] " + debugBufferLine;
+    unsigned long now = (millis() + 500) / 1000;  // Seconds
+    int d = now / 86400, h = (now / 3600) % 24, m = (now / 60) % 60, s = now % 60;
+    struct tm timeinfo;
+    char buffer[20];
+    if (getLocalTime(&timeinfo))
+      strftime(buffer, sizeof(buffer), "%d.%m.%y %H:%M:%S", &timeinfo);
+    else
+      sprintf(buffer, "%8d %02d:%02d:%02d", d, h, m, s);
+    debugBufferArray[debugBufferIndexNextEmpty++] = String(buffer) + " [" + sign + "] " + debugBufferLine;
     debugBufferLine = "";
-    debugBufferIndexNextEmpty = (debugBufferIndexNextEmpty + 1) % DEBUG_BUFFER_SIZE;
+    debugBufferIndexNextEmpty %= DEBUG_BUFFER_SIZE;
     if (debugBufferIndexLastShown == debugBufferIndexNextEmpty)  // If circular buffer is full release oldest entry
       debugBufferIndexLastShown = (debugBufferIndexLastShown + 1) % DEBUG_BUFFER_SIZE;
   }
@@ -252,11 +265,11 @@ void loop() {
   // Pump mode hysteresis for mold prevention - only check for switching down after pump cooldown!
   if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThreshold1 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + pumpDelayInMinutes * 60000)) {
     debugln(DEBUG_TRACE, __LINE__);
-    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is above upper threshold (" + String(humidityThreshold1) + "), switching to falling mode");
+    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or above upper threshold (" + String(humidityThreshold1) + "), switching to falling mode");
     humidityThresholdHysteresisFalling = true;
   } else if (humidityThresholdHysteresisFalling && overallAverageHumidity <= humidityThreshold2) {
     debugln(DEBUG_TRACE, __LINE__);
-    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is below lower threshold (" + String(humidityThreshold2) + "), switching to rising mode");
+    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or below lower threshold (" + String(humidityThreshold2) + "), switching to rising mode");
     humidityThresholdHysteresisFalling = false;
   }
 
@@ -325,7 +338,7 @@ void doEmptyWaterWarning() {
     int httpResponseCode = http.GET();
     debugln(DEBUG_VERBOSE, "Response: " + httpResponseCode);
     if (httpResponseCode != 200)
-      debugln(DEBUG_ERROR, http.getString());
+      debugln(DEBUG_ERROR, "doEmptyWaterWarning response code: " + http.getString());
     http.end();
   } else {
     debugln(DEBUG_WARN, "WiFi Disconnected");
@@ -343,7 +356,7 @@ void doStatusReporting() {
     http.begin(String(reportURL) + "?oah=" + overallAverageHumidity + "&t1=" + humidityThreshold1 + "&t2=" + humidityThreshold2);
     int httpResponseCode = http.GET();
     if (httpResponseCode != 200) {
-      debugln(DEBUG_ERROR, "Error while reporting: " + http.getString());
+      debugln(DEBUG_ERROR, "doStatusReporting response code: " + http.getString());
     }
     http.end();
   } else {
@@ -377,6 +390,7 @@ void stopPump() {
   startPumpMillis = 0;
 }
 
+// Will only be called from setup() once and in loop IF no connection
 bool connectToWiFi() {
   // Try the stored values for ssid and password, if any
   if (ssid != NULL && pwd != NULL) {
@@ -388,7 +402,7 @@ bool connectToWiFi() {
       delay(1000);
       debug(DEBUG_INFO, ".");
     }
-    debugln(DEBUG_INFO);
+    debugln(DEBUG_INFO, "");
   }
 
   // Try the values from the "ssidAndPassword.h" file
@@ -406,13 +420,14 @@ bool connectToWiFi() {
       delay(1000);
       debug(DEBUG_INFO, ".");
     }
-    debugln(DEBUG_INFO);
+    debugln(DEBUG_INFO, "");
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     digitalWrite(LED_BUILTIN, HIGH);
-    debugln(DEBUG_VERBOSE, "Success: " + WiFi.localIP().toString());
+    debugln(DEBUG_VERBOSE, "Connected: " + WiFi.localIP().toString());
     server.begin();
+    configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER);
     delay(100);
     digitalWrite(LED_BUILTIN, LOW);
     return true;
