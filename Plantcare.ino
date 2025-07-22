@@ -307,7 +307,7 @@ void loop() {
   if (startPumpMillis != 0 && (currentMillis - startPumpMillis > pumpRuntimeInSeconds * 1000 || currentMillis < startPumpMillis)) {  // Force switch off pump in case of timer overflow (every ~52 days)
     stopPump();
     debugln(DEBUG_TRACE, __LINE__);
-    debugln(DEBUG_INFO, "Average current: " + currentPumpCurrentValue);
+    debugln(DEBUG_INFO, "Average current: " + String(currentPumpCurrentValue) + " mA");
     lastPumpCurrentValue = currentPumpCurrentValue;
     if (currentPumpCurrentValue < dryWetPumpBorderValue) {
       debugln(DEBUG_TRACE, __LINE__);
@@ -353,7 +353,7 @@ void doStatusReporting() {
   }
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    http.begin(String(reportURL) + "?oah=" + overallAverageHumidity + "&t1=" + humidityThreshold1 + "&t2=" + humidityThreshold2);
+    http.begin(String(reportURL) + "?oah=" + String(overallAverageHumidity) + "&t1=" + String(humidityThreshold1) + "&t2=" + String(humidityThreshold2));
     int httpResponseCode = http.GET();
     if (httpResponseCode != 200) {
       debugln(DEBUG_ERROR, "doStatusReporting response code: " + http.getString());
@@ -507,7 +507,7 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
       WiFi.reconnect();
       break;
     case ARDUINO_EVENT_WPS_ER_SUCCESS:
-      debugln(DEBUG_INFO, "WPS Successful, stopping WPS and connecting to: " + String(WiFi.SSID()));
+      debugln(DEBUG_INFO, "WPS Successful, stopping WPS and connecting to: " + WiFi.SSID());
       wpsStop();
       delay(10);
       WiFi.begin();
