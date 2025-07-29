@@ -203,7 +203,7 @@ void setup() {
     prefs.putInt("threshold2", humidityThreshold2);
   }
   if (isnan(pumpRuntimeInSeconds)) {
-    pumpRuntimeInSeconds = 1.2;
+    pumpRuntimeInSeconds = 0.8;
     prefs.putDouble("pumptime", pumpRuntimeInSeconds);
   }
   if (pumpDelayInMinutes == 0) {
@@ -211,7 +211,7 @@ void setup() {
     prefs.putInt("pumpdelay", pumpDelayInMinutes);
   }
   if (dryWetPumpBorderValue == 0) {
-    dryWetPumpBorderValue = 300;  // Dry: ~130 mA, Submerged: ~397 Ah // TODO
+    dryWetPumpBorderValue = 250;  // Dry: ~130 mA, Submerged: ~397 Ah // TODO
     prefs.putInt("drypump", dryWetPumpBorderValue);
   }
   if (emptyWaterURL == NULL) {
@@ -607,7 +607,7 @@ void webServerReaction() {
             prefs.putInt("threshold2", humidityThreshold2);
 
             pumpRuntimeInSeconds = currentLine.substring(currentLine.indexOf("pumptime") + String("pumptime").length() + 1).toDouble();
-            pumpRuntimeInSeconds = pumpRuntimeInSeconds < 1 ? 1 : (pumpRuntimeInSeconds > 300 ? 300 : pumpRuntimeInSeconds);
+            pumpRuntimeInSeconds = pumpRuntimeInSeconds <= 0 ? 1 : (pumpRuntimeInSeconds > 300 ? 300 : pumpRuntimeInSeconds);
             prefs.putDouble("pumptime", pumpRuntimeInSeconds);
 
             pumpDelayInMinutes = currentLine.substring(currentLine.indexOf("pumpdelay") + String("pumpdelay").length() + 1).toInt();
