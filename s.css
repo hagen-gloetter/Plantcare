@@ -1,0 +1,144 @@
+* {
+     -moz-box-sizing: border-box;
+     -webkit-box-sizing: border-box;
+     box-sizing: border-box;
+}
+body {
+     font-size: 13px;
+     font: 0.81em Arial, Helvetica, sans-serif;
+     margin: 0;
+}
+a {
+     text-decoration: none;
+}
+:focus {
+     outline: none;
+}
+.outer {
+     align-items: center;
+     background-repeat: no-repeat;
+     background-size: cover;
+     display: grid;
+     min-height: 100vh;
+}
+.inner {
+     margin: auto;
+     min-width: 850px;
+}
+.panel {
+     border-radius: 10px;
+     margin-top: 20px;
+     padding: 5px 4px 15px 4px;
+     position: relative;
+}
+.panel>label {
+     font-size: 21px;
+     font: 1.6em Arial, Helvetica, sans-serif;
+     left: 8px;
+     padding: 0px 5px;
+     position: absolute;
+     top: -15px;
+}
+.form-group {
+     display: flex;
+}
+.form-group .form-wrapper {
+     margin-left: 7px;
+     margin-right: 7px;
+     width: 100%;
+}
+.form-wrapper label {
+     display: inline;
+     left: 17px;
+     padding: 0px 5px;
+     position: relative;
+     top: 8px;
+}
+span.form-control {
+     padding-top: 10px;
+}
+input.form-control, select.form-control {
+     font: bold 1.2em Arial, Helvetica, sans-serif;
+}
+.form-control {
+     background: none;
+     border-radius: 20px;
+     display: block;
+     font-size: 16px;
+     font: 1.2em Arial, Helvetica, sans-serif;
+     height: 40px;
+     min-width: 95px;
+     padding: 0 20px;
+     width: 100%;
+}
+select {
+     -moz-appearance: none;
+     -webkit-appearance: none;
+     cursor: pointer;
+     padding-left: 20px;
+}
+select option[value=""][disabled] {
+     display: none;
+}
+
+button {
+     align-items: center;
+     border-radius: 20px;
+     border: none;
+     cursor: pointer;
+     display: flex;
+     font-size: 16px;
+     font-weight: bold;
+     font: bold 1.2em Arial, Helvetica, sans-serif;
+     height: 40px;
+     justify-content: center;
+     margin: auto;
+     margin-top: 10px;
+     overflow: hidden;
+     padding: 5px;
+     position: relative;
+     text-transform: uppercase;
+     vertical-align: middle;
+     width: 152px;
+}
+.smallbutton {
+     border-radius: 15px;
+     display: inline-block;
+     font: bold 0.85em Arial, Helvetica, sans-serif;
+     font-size: 11px;
+     height: 31px;
+     margin-top: 20px;
+     padding: 1px 6px;
+     text-align: center;
+     vertical-align: middle;
+     width: 80px;
+}
+.smallbutton-wrapper {
+     height: inherit;
+     vertical-align: middle;
+     display: table-cell;
+     width: inherit;
+}
+.form-wrapper:has(> .smallbutton) {
+     text-align: center;
+}
+button input {
+     display: none;     
+}
+
+.checkbox label {
+     cursor: pointer;
+     left: 0;
+     padding: 0;
+     position: initial;
+     top: 0;
+}
+.checkbox input {
+     cursor: pointer;
+     opacity: 0.7;
+}
+
+.footer {
+     margin-top: 10px;
+     font-size: 11px;
+}

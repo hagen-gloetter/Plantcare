@@ -44,14 +44,21 @@
 
 // ---------------------------------------------------------------------------
 
+#define DEFAULT_STYLESHEET "d.css"
+
 #define PAGE_DEFAULT 0
-#define PAGE_HUMIDITYVAL 1
-#define PAGE_HUMIDITY 2
-#define PAGE_PUMPVAL 3
-#define PAGE_JQUERY 4
-#define PAGE_DEBUG 5
-#define PAGE_DEBUG_BODY_PART 6
-#define PAGE_DEBUG_BODY_FULL 7
+#define PAGE_DEFAULT_POST1 1
+#define PAGE_DEFAULT_POST2 2
+#define PAGE_HUMIDITYVAL 3
+#define PAGE_HUMIDITY 4
+#define PAGE_PUMPVAL 5
+#define PAGE_JQUERY 6
+#define PAGE_STYLE 7
+#define PAGE_DSTYLE 8
+#define PAGE_NSTYLE 9
+#define PAGE_DEBUG 10
+#define PAGE_DEBUG_BODY_PART 11
+#define PAGE_DEBUG_BODY_FULL 12
 
 #define DEBUG_ERROR 1
 #define DEBUG_WARN 2
@@ -61,6 +68,9 @@
 #define DEBUG_TRACE 6
 
 INCTXT(JQuery, "jquery-3.7.1.min.js");  // -> gJQueryData , see https://github.com/AlexIII/incbin-arduino
+INCTXT(Style, "s.css");
+INCTXT(DStyle, "d.css");
+INCTXT(NStyle, "n.css");
 
 // Wemos D1 Mini ESP32
 // https://wiki.csgalileo.org/_media/projects/internetofthings/d1_mini_esp32_-_pinout.pdf
@@ -76,7 +86,7 @@ WiFiServer server(80);
 unsigned long startOfMainLoopMillis, lastMillis60s, startPumpMillis, lastPumpStartMillis, refreshPagesMillis;
 int page, subpage;
 bool checkWifiConnectionFlag = true, humidityThresholdHysteresisFalling, serialDebug, serialDebugActive;
-String ssid, pwd, emptyWaterURL, reportURL;
+String ssid, pwd, emptyWaterURL, reportURL, stylesheet;
 int humidityThreshold1, humidityThreshold2, pumpDelayInMinutes, dryWetPumpBorderValue;
 double pumpRuntimeInSeconds;
 int currentPumpCurrentValue, lastPumpCurrentValue = 0;
@@ -141,6 +151,10 @@ double mapf(const double x, const double in_min, const double in_max, const doub
 }
 
 void setup() {
+  // Serial.begin(115200);      // DEBUG
+  // serialDebug = true;        // DEBUG
+  // serialDebugActive = true;  // DEBUG
+
   analogReadResolution(10);  // Backwards compatibility: 0-1023
   pinMode(LED_BUILTIN, OUTPUT);
 
@@ -187,6 +201,8 @@ void setup() {
   dryWetPumpBorderValue = prefs.getInt("drypump");
   emptyWaterURL = prefs.getString("emptyUrl");
   reportURL = prefs.getString("reportURL");
+  debugLevel = prefs.getInt("debugLevel");
+  stylesheet = prefs.getString("stylesheet");
   if (numberOfActiveSensors == 0) {
     debugln(DEBUG_INFO, "No GPIO enabled, activating first in line");
     char portname[7];  // gpioXX\0
@@ -225,6 +241,10 @@ void setup() {
   if (debugLevel < DEBUG_ERROR) {
     debugLevel = DEBUG_INFO;
     prefs.putInt("debugLevel", debugLevel);
+  }
+  if (stylesheet == NULL) {
+    stylesheet = DEFAULT_STYLESHEET;
+    prefs.putString("stylesheet", stylesheet);
   }
 
   if (!connectToWiFi()) {
@@ -322,7 +342,7 @@ void loop() {
   }
 
   currentMillis = millis();
-  delay(startPumpMillis == 0 && currentMillis - refreshPagesMillis > 5000 ? 2000 : 2);  // React quickly on startup and page load as well as when pump is running
+  delay(startPumpMillis == 0 && currentMillis - refreshPagesMillis > 5000 ? 300 : 2);  // React quickly on startup and page load as well as when pump is running
 }
 
 void doEmptyWaterWarning() {
@@ -424,10 +444,10 @@ bool connectToWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(LED_BUILTIN, HIGH);
     debugln(DEBUG_VERBOSE, "Connected: " + WiFi.localIP().toString());
     server.begin();
     configTime(NTP_GMT_OFFSET_SEC, NTP_DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+    digitalWrite(LED_BUILTIN, HIGH);
     delay(100);
     digitalWrite(LED_BUILTIN, LOW);
     return true;
@@ -535,12 +555,22 @@ void webServerReaction() {
   WiFiClient client = server.accept();
   if (client) {
     String currentLine = "";
+    int contentLength, lineLength;
     while (client.connected()) {
       if (client.available()) {
         char c = client.read();
+        if (c != '\n' && c != '\r')
+          lineLength++;
+        if (page == PAGE_DEFAULT_POST2 && contentLength == lineLength) {
+          currentLine += c;  // Normally done at end of routine but we need it here already!
+          c = '\n';          // A POST request does not send a LF at the end of the request so we need to simulate this!
+        }
         if (c == '\n') {
-          debugln(DEBUG_DEBUG, currentLine);  // DEBUG
-          if (currentLine.startsWith("GET /H?")) {
+          debugln(DEBUG_DEBUG, "## " + currentLine);
+          if (currentLine.substring(0, currentLine.indexOf(":")).equalsIgnoreCase("content-length")) {
+            contentLength = currentLine.substring(currentLine.indexOf(":") + 1).toInt();
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Content-length found: " + contentLength);
+          } else if (currentLine.startsWith("GET /H?")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Humidity value block: " + currentLine);
             page = PAGE_HUMIDITYVAL;
             subpage = currentLine.substring(strlen("GET /H?")).toInt();
@@ -548,6 +578,22 @@ void webServerReaction() {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Humidity all values block: " + currentLine);
             page = PAGE_HUMIDITYVAL;
             subpage = -1;
+          } else if (currentLine.startsWith("GET /jq.js")) {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> JQuery file: " + currentLine);
+            page = PAGE_JQUERY;
+          } else if (currentLine.startsWith("GET /s.css")) {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Style file: " + currentLine);
+            page = PAGE_STYLE;
+          } else if (currentLine.startsWith("GET /d.css")) {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Day Style file: " + currentLine);
+            page = PAGE_DSTYLE;
+            stylesheet = "d.css";
+            prefs.putString("stylesheet", stylesheet);
+          } else if (currentLine.startsWith("GET /n.css")) {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Night Style file: " + currentLine);
+            page = PAGE_NSTYLE;
+            stylesheet = "n.css";
+            prefs.putString("stylesheet", stylesheet);
           } else if (currentLine.startsWith("GET /S")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Switch hysteresis direction: " + currentLine);
             humidityThresholdHysteresisFalling = !humidityThresholdHysteresisFalling;
@@ -566,9 +612,6 @@ void webServerReaction() {
           } else if (currentLine.startsWith("GET /R")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Report test activate: " + currentLine);
             doStatusReporting();
-          } else if (currentLine.startsWith("GET /JQ.js")) {
-            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> JQuery file: " + currentLine);
-            page = PAGE_JQUERY;
           } else if (currentLine.startsWith("GET /Da")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Debug main page: " + currentLine);
             page = PAGE_DEBUG;
@@ -579,7 +622,11 @@ void webServerReaction() {
           } else if (currentLine.startsWith("GET /Dc")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Debug body (full): " + currentLine);
             page = PAGE_DEBUG_BODY_FULL;
-          } else if (currentLine.startsWith("GET /?")) {
+          } else if (currentLine.startsWith("POST /")) {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Post page 1: " + currentLine);
+            page = PAGE_DEFAULT_POST1;
+          } else if (page == PAGE_DEFAULT_POST2) {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Post page 3");
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Saving default config page: " + currentLine);
             for (int v = 0; v < sensorPortTotalNumber; v++) {
               char portname[10];  // gpioXX\0 gpiodryXX\0 gpiowetXX\0
@@ -646,186 +693,359 @@ void webServerReaction() {
             prefs.putInt("debugLevel", debugLevel);
 
             serialDebug = currentLine.indexOf("serialDebug") != -1;
-          } else {
+
+            page = PAGE_DEFAULT;
+            currentLine = "";
+          } else if (currentLine.startsWith("GET /")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Default config page: " + currentLine);
             refreshPagesMillis = millis();  // Clean main page
           }
+
           if (currentLine.length() == 0) {
-            client.println("HTTP/1.1 200 OK");
-            if (page == PAGE_HUMIDITYVAL) {
-              client.println("Content-type:application/json;charset=utf-8");
-              client.println();
-              if (subpage >= 0 && subpage < sensorPortTotalNumber)
-                client.println(averageHumidity[subpage]);
-              else
-                client.println(getAvgValues());
-            } else if (page == PAGE_HUMIDITY) {
-              client.println("Content-type:application/json;charset=utf-8");
-              client.println();
-              client.println(overallAverageHumidity);
-            } else if (page == PAGE_PUMPVAL) {
-              client.println("Content-type:application/json;charset=utf-8");
-              client.println();
-              client.print(lastPumpCurrentValue);
-            } else if (page == PAGE_JQUERY) {
-              client.println("Content-type:application/javascript;charset=utf-8");
-              client.println("Pragma: public");
-              client.println("Cache-Control: public, max-age=3600;");
-              client.println("Last-Modified: Wed, 25 Jun 2025 11:21:08 GMT");
-              client.print("Content-Length: ");
-              client.println(gJQuerySize);
-              client.println();
-              client.println(gJQueryData);
-            } else if (page == PAGE_DEBUG) {
-              client.println("Content-type:text/html;charset=utf-8");
-              client.println();
-              client.println("<html><head><script src=\"JQ.js\"></script><script>function go(){"
-                             "y=$(document).height()-window.pageYOffset-window.innerHeight;"
-                             "$.get(\"/Db\",function(x){"
-                             "$('#d').append(x);"
-                             "if(y<30)$(\"html,body\").animate({scrollTop:$(document).height()},\"slow\")"
-                             "});"
-                             "setTimeout(go,5000)"
-                             "}$(document).ready(function(){$('#d').load(\"/Dc\",go())})</script></head><body style=\"background:#020;color:#0f0\"><pre id=\"d\"></pre></body></html>");
-            } else if (page == PAGE_DEBUG_BODY_FULL) {
-              client.println("Content-type:text/plain;charset=utf-8");
-              client.println();
-              for (int t = 0; t < DEBUG_BUFFER_SIZE; t++) {
-                const int idx = (debugBufferIndexNextEmpty + t) % DEBUG_BUFFER_SIZE;
-                if (debugBufferArray[idx] != "")
-                  client.println(debugBufferArray[idx]);
-              }
-              debugBufferIndexLastShown = debugBufferIndexNextEmpty;
-            } else if (page == PAGE_DEBUG_BODY_PART) {
-              client.println("Content-type:text/plain;charset=utf-8");
-              client.println();
-              const int used = (debugBufferIndexNextEmpty + DEBUG_BUFFER_SIZE - debugBufferIndexLastShown) % DEBUG_BUFFER_SIZE;
-              for (int t = 0; t < used; t++)
-                client.println(debugBufferArray[(debugBufferIndexLastShown + t) % DEBUG_BUFFER_SIZE]);
-              debugBufferIndexLastShown = debugBufferIndexNextEmpty;
+            if (page == PAGE_DEFAULT_POST1) {
+              debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Post page 2");
+              page = PAGE_DEFAULT_POST2;
             } else {
-              client.println("Content-type:text/html;charset=utf-8");
-              client.println();
-              client.println("<html>");
-              client.println("<head>");
-              client.println("	<script src=\"JQ.js\"></script>");
-              client.println("	<script>");
-              client.println("		function a() {");
-              client.println("			$(\"#pc\").load(\"/P\");");
-              client.println("			$(\"#ho\").load(\"/O\");");
-              for (int v = 0; v < sensorPortTotalNumber; v++) {
-                client.println("			$(\"#h" + String(sensorPort[v]) + "\").load(\"/H?" + String(v) + "\");");
+              client.println("HTTP/1.1 200 OK");
+              if (page == PAGE_HUMIDITYVAL) {
+                client.println("Content-type:application/json;charset=utf-8");
+                client.println();
+                if (subpage >= 0 && subpage < sensorPortTotalNumber)
+                  client.println(averageHumidity[subpage]);
+                else
+                  client.println(getAvgValues());
+              } else if (page == PAGE_HUMIDITY) {
+                client.println("Content-type:application/json;charset=utf-8");
+                client.println();
+                client.println(overallAverageHumidity);
+              } else if (page == PAGE_PUMPVAL) {
+                client.println("Content-type:application/json;charset=utf-8");
+                client.println();
+                client.print(lastPumpCurrentValue);
+              } else if (page == PAGE_JQUERY) {
+                client.println("Content-type:application/javascript;charset=utf-8");
+                client.println("Pragma: public");
+                client.println("Cache-Control: public, max-age=36000;");
+                client.println("Last-Modified: Wed, 25 Jun 2025 11:21:08 GMT");
+                client.print("Content-Length: ");
+                client.println(gJQuerySize);
+                client.println();
+                client.println(gJQueryData);
+              } else if (page == PAGE_STYLE) {
+                client.println("Content-type:text/css;charset=utf-8");
+                client.println("Pragma: public");
+                client.println("Cache-Control: public, max-age=36000;");
+                client.println("Last-Modified: Wed, 25 Jun 2025 11:21:08 GMT");
+                client.print("Content-Length: ");
+                client.println(gStyleSize);
+                client.println();
+                client.println(gStyleData);
+              } else if (page == PAGE_DSTYLE) {
+                client.println("Content-type:text/css;charset=utf-8");
+                client.println("Pragma: public");
+                client.println("Cache-Control: public, max-age=36000;");
+                client.println("Last-Modified: Wed, 25 Jun 2025 11:21:08 GMT");
+                client.print("Content-Length: ");
+                client.println(gDStyleSize);
+                client.println();
+                client.println(gDStyleData);
+              } else if (page == PAGE_NSTYLE) {
+                client.println("Content-type:text/css;charset=utf-8");
+                client.println("Pragma: public");
+                client.println("Cache-Control: public, max-age=36000;");
+                client.println("Last-Modified: Wed, 25 Jun 2025 11:21:08 GMT");
+                client.print("Content-Length: ");
+                client.println(gNStyleSize);
+                client.println();
+                client.println(gNStyleData);
+              } else if (page == PAGE_DEBUG) {
+                client.println("Content-type:text/html;charset=utf-8");
+                client.println();
+                client.println("<html><head><script src=\"jq.js\"></script><script>function go(){"
+                               "y=$(document).height()-window.pageYOffset-window.innerHeight;"
+                               "$.get(\"/Db\",function(x){"
+                               "$('#d').append(x);"
+                               "if(y<30)$(\"html,body\").animate({scrollTop:$(document).height()},\"slow\")"
+                               "});"
+                               "setTimeout(go,5000)"
+                               "}$(document).ready(function(){$('#d').load(\"/Dc\",go())})</script></head><body style=\"background:#020;color:#0f0\"><pre id=\"d\"></pre></body></html>");
+              } else if (page == PAGE_DEBUG_BODY_FULL) {
+                client.println("Content-type:text/plain;charset=utf-8");
+                client.println();
+                for (int t = 0; t < DEBUG_BUFFER_SIZE; t++) {
+                  const int idx = (debugBufferIndexNextEmpty + t) % DEBUG_BUFFER_SIZE;
+                  if (debugBufferArray[idx] != "")
+                    client.println(debugBufferArray[idx]);
+                }
+                debugBufferIndexLastShown = debugBufferIndexNextEmpty;
+              } else if (page == PAGE_DEBUG_BODY_PART) {
+                client.println("Content-type:text/plain;charset=utf-8");
+                client.println();
+                const int used = (debugBufferIndexNextEmpty + DEBUG_BUFFER_SIZE - debugBufferIndexLastShown) % DEBUG_BUFFER_SIZE;
+                for (int t = 0; t < used; t++)
+                  client.println(debugBufferArray[(debugBufferIndexLastShown + t) % DEBUG_BUFFER_SIZE]);
+                debugBufferIndexLastShown = debugBufferIndexNextEmpty;
+              } else {
+                client.println("Content-type:text/html;charset=utf-8");
+                client.println();
+                client.println("<!DOCTYPE html>");
+                client.println("<html>");
+                client.println("<head>");
+                client.println("	<meta http-equiv=\"content-type\" content=\"text/html; charset=UTF-8\">");
+                client.println("	<meta charset=\"utf-8\">");
+                client.println("	<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">");
+                client.println("	<link rel=\"stylesheet\" href=\"s.css\">");
+                client.println("	<link rel=\"stylesheet\" href=\"" + String(stylesheet) + "\">");
+                client.println("	<meta name=\"robots\" content=\"noindex, follow\">");
+                client.println("	<script src=\"jq.js\"></script>");
+                client.println("	<script>");
+                client.println("		function a() {");
+                client.println("			$(\"#pc\").load(\"/P\");");
+                client.println("			$(\"#ho\").load(\"/O\");");
+                for (int v = 0; v < sensorPortTotalNumber; v++) {
+                  client.println("			$(\"#h" + String(sensorPort[v]) + "\").load(\"/H?" + String(v) + "\");");
+                }
+                client.println("			setTimeout(a, 10000);");
+                client.println("		}");
+                client.println("		$(document).ready(function(){a()});");
+                client.println("	</script>");
+                client.println("</head>");
+                client.println("<body>");
+                client.println("	<form method=\"post\" action=\"/\">");
+                client.println("		<div class=\"outer\">");
+                client.println("			<div class=\"inner\">");
+                client.println("				<div class=\"panel\">");
+                client.println("					<label>Sensors</label>");
+                for (int v = 0; v < sensorPortTotalNumber; v++) {
+                  client.println("					<div class=\"form-group\">");
+                  client.println("						<div class=\"form-group\">");
+                  client.println("							<div class=\"form-wrapper\">");
+                  client.println("								<label>GPIO</label>");
+                  client.println("								<span class=\"form-control checkbox\">");
+                  client.println("									<label>");
+                  client.println("										<nobr><input type=\"checkbox\" name=\"gpio" + String(sensorPort[v]) + "\" value=\"1\" " + String(activeSensor[v] ? " checked" : "") + "> " + String(sensorPort[v]) + "</nobr>");
+                  client.println("									</label>");
+                  client.println("								</span>");
+                  client.println("							</div>");
+                  client.println("						</div>");
+                  client.println("						<div class=\"form-wrapper\" title=\"Absolute sensor value when clean and surrounded by air\">");
+                  client.println("							<label>Dry</label>");
+                  client.println("							<input class=\"form-control\" name=\"gpiodry" + String(sensorPort[v]) + "\" size=\"5\" value=\"" + String(sensorDryHumidity[v]) + "\">");
+                  client.println("						</div>");
+                  client.println("						<div class=\"form-wrapper\" title=\"Absolute sensor value when submerged in water\">");
+                  client.println("							<label>Wet</label>");
+                  client.println("							<input class=\"form-control\" name=\"gpiowet" + String(sensorPort[v]) + "\" size=\"5\" value=\"" + String(sensorWetHumidity[v]) + "\"></td>");
+                  client.println("						</div>");
+                  client.println("						<div class=\"form-group\">");
+                  client.println("							<div class=\"form-wrapper\">");
+                  client.println("								<label>Now</label>");
+                  client.println("								<span class=\"form-control\" id=\"h" + String(sensorPort[v]) + "\">X</span>");
+                  client.println("							</div>");
+                  client.println("						</div>");
+                  client.println("					</div>");
+                }
+                client.println("				</div>");
+                client.println("				<div class=\"panel\">");
+                client.println("					<label>Trigger Levels</label>");
+                client.println("					<div class=\"form-group\">");
+                client.println("						<div class=\"form-wrapper\" title=\"When reaching or exceeding this humidity level cyclic pumping will be deactivated for mold prevention until the lower level is reached.\">");
+                client.println("							<label>Upper hysteresis level (%)</label>");
+                client.println("							<input class=\"form-control\" name=\"threshold1\" size=\"5\" value=\"" + String(humidityThreshold1) + "\">");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\" title=\"When reaching or undercutting this humidity level cyclic pumping will be activated until the upper level is reached.\">");
+                client.println("							<label>Lower hysteresis level (%)</label>");
+                client.println("							<input class=\"form-control\" name=\"threshold2\" size=\"5\" value=\"" + String(humidityThreshold2) + "\">");
+                client.println("						</div>");
+                client.println("						<div class=\"form-group\">");
+                client.println("							<div class=\"form-wrapper\">");
+                client.println("								<label>Now (%)</label>");
+                client.println("								<span class=\"form-control\" id=\"ho\">X</span>");
+                client.println("							</div>");
+                client.println("							<!-- div class=\"form-wrapper\">");
+                client.println("								<a href=\"/S\"><button class=\"smallbutton\">Switch</button></a>");
+                client.println("							</div -->");
+                client.println("						</div>");
+                client.println("					</div>");
+                client.println("					<div class=\"form-group\">");
+                client.println("						<div class=\"form-wrapper\" title=\"Time the pump will be activated per pump cycle (or when testing) in seconds.\">");
+                client.println("							<label>Pump runtime (s)</label>");
+                client.println("							<input class=\"form-control\" name=\"pumptime\" size=\"5\" value=\"" + String(pumpRuntimeInSeconds) + "\">");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\" title=\"Minimum delay between the starts of two pump activations (not including pump test) in minutes.\">");
+                client.println("							<label>Pump delay (m)</label>");
+                client.println("							<input class=\"form-control\" name=\"pumpdelay\" size=\"5\" value=\"" + String(pumpDelayInMinutes) + "\">");
+                client.println("						</div>");
+                client.println("					</div>");
+                client.println("					<div class=\"form-group\">");
+                client.println("						<div class=\"form-wrapper\" title=\"This value determines if the water supply is empty. It does so by measuring the electric current of the pump which is way lower when no water is pumped. Set this value to somewhere in between the current when pumping water and when running dry in milliamperes.\">");
+                client.println("							<label>Water detection (mA)</label>");
+                client.println("							<input class=\"form-control\" name=\"drypump\" size=\"5\" value=\"" + String(dryWetPumpBorderValue) + "\">");
+                client.println("						</div>");
+                client.println("						<div class=\"form-group\">");
+                client.println("							<div class=\"form-wrapper\">");
+                client.println("								<label>Last (mA)</label>");
+                client.println("								<span class=\"form-control\" id=\"pc\">X</span>");
+                client.println("							</div>");
+                client.println("							<div class=\"form-wrapper\">");
+                client.println("								<a href=\"/T\" class=\"smallbutton\">");
+                client.println("									<div class=\"smallbutton-wrapper\">");
+                client.println("										Test");
+                client.println("									</div>");
+                client.println("								</a>");
+                client.println("							</div>");
+                client.println("						</div>");
+                client.println("					</div>");
+                client.println("				</div>");
+                client.println("				<div class=\"panel\">");
+                client.println("					<label>Reporting URLs</label>");
+                client.println("					<div class=\"form-group\">");
+                client.println("						<div class=\"form-wrapper\" title=\"This URL will be called when there is no more water and the pump is running dry.\">");
+                client.println("							<label>Empty warning to (URL)</label>");
+                client.println("							<input class=\"form-control\" name=\"emptyUrl\" maxlength=\"255\" size=\"40\" value=\"" + String(emptyWaterURL) + "\">");
+                client.println("						</div>");
+                client.println("						<div class=\"form-group\">");
+                client.println("							<div class=\"form-wrapper\">");
+                client.println("								<a href=\"/E\" class=\"smallbutton\">");
+                client.println("									<div class=\"smallbutton-wrapper\">");
+                client.println("										Test");
+                client.println("									</div>");
+                client.println("								</a>");
+                client.println("							</div>");
+                client.println("						</div>");
+                client.println("					</div>");
+                client.println("					<div class=\"form-group\">");
+                client.println("						<div class=\"form-wrapper\" title=\"This URL will be called cyclically to send the current humidity value to e.g. a database.\">");
+                client.println("							<label>Status reports to (URL)</label>");
+                client.println("							<input class=\"form-control\" name=\"reportURL\" maxlength=\"255\" size=\"40\" value=\"" + String(reportURL) + "\">");
+                client.println("						</div>");
+                client.println("						<div class=\"form-group\">");
+                client.println("							<div class=\"form-wrapper\">");
+                client.println("								<a href=\"/R\" class=\"smallbutton\">");
+                client.println("									<div class=\"smallbutton-wrapper\">");
+                client.println("										Test");
+                client.println("									</div>");
+                client.println("								</a>");
+                client.println("							</div>");
+                client.println("						</div>");
+                client.println("					</div>");
+                client.println("				</div>");
+                client.println("				<div class=\"panel\">");
+                client.println("					<label>Debugging</label>");
+                client.println("					<div class=\"form-group\">");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<label>Debug Level</label>");
+                client.println("							<select class=\"form-control\" name=\"debugLevel\">");
+                client.println("							<option value=\"" + String(DEBUG_ERROR) + "\" " + (debugLevel == DEBUG_ERROR ? " selected=\"true\"" : "") + ">Error</option>");
+                client.println("							<option value=\"" + String(DEBUG_WARN) + "\" " + (debugLevel == DEBUG_WARN ? " selected=\"true\"" : "") + ">Warn</option>");
+                client.println("							<option value=\"" + String(DEBUG_INFO) + "\" " + (debugLevel == DEBUG_INFO ? " selected=\"true\"" : "") + ">Info</option>");
+                client.println("							<option value=\"" + String(DEBUG_VERBOSE) + "\" " + (debugLevel == DEBUG_VERBOSE ? " selected=\"true\"" : "") + ">Verbose</option>");
+                client.println("							<option value=\"" + String(DEBUG_DEBUG) + "\" " + (debugLevel == DEBUG_DEBUG ? " selected=\"true\"" : "") + ">Debug</option>");
+                client.println("							<option value=\"" + String(DEBUG_TRACE) + "\" " + (debugLevel == DEBUG_TRACE ? " selected=\"true\"" : "") + ">Trace</option>");
+                client.println("							</select>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-group\">");
+                client.println("							<div class=\"form-wrapper\" title=\"Debugging informationen will be transmitted additionally to the serial interface using 115200 Baud.\">");
+                client.println("								<label>Serial Debug</label>");
+                client.println("								<span class=\"form-control checkbox\">");
+                client.println("									<label>");
+                client.println("										<nobr><input type=\"checkbox\" name=\"serialDebug\" value=\"1\"" + String(serialDebug ? " checked" : "") + "> Active</nobr>");
+                client.println("									</label>");
+                client.println("								</span>");
+                client.println("							</div>");
+                client.println("						</div>");
+                client.println("					</div>");
+                client.println("				</div>");
+                client.println("				<div class=\"panel\">");
+                client.println("					<div class=\"form-wrapper\">");
+                client.println("						<button>");
+                client.println("							<input type=\"submit\" value=\"save\">");
+                client.println("							save");
+                client.println("						</button>");
+                client.println("					</div>");
+                client.println("				</div>");
+                client.println("				<div class=\"panel\">");
+                client.println("					<label>Additional Pages</label>");
+                client.println("					<div class=\"form-group\">");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/H\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									Sensor values");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/O\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									Average humidity");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/P\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									Pump current");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/jq.js\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									JQuery");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/s.css\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									Main Stylesheet");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/d.css\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									Stylesheet 1");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/n.css\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									Stylesheet 2");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/Da\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									Debug");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("					</div>");
+                client.println("				</div>");
+                client.println("				<div class=\"footer\" align=\"center\">");
+                client.println("					<a href=\"https://github.com/Joghurt/Plantcare/\" target=\"_blank\">github.com/Joghurt/Plantcare</a>");
+                client.println("				</div>");
+                client.println("			</div>");
+                client.println("		</div>");
+                client.println("	</form>");
+                client.println("</body>");
+                client.println("</html>");
               }
-              client.println("			setTimeout(a,10000);");
-              client.println("		}");
-              client.println("		$(document).ready(function(){a()});");
-              client.println("	</script>");
-              client.println("	<style>");
-              client.println("		body {");
-              client.println("			font-family:Arial,Helvetica,sans-serif;");
-              client.println("			background:#ddd;");
-              client.println("		}");
-              client.println("	</style>");
-              client.println("</head>");
-              client.println("<body>");
-              client.println("	<table width=\"100%\" height=\"100%\"><tr align=\"center\"><td>");
-              client.println("		<form action=\"/\">");
-              client.println("			<table>");
-              client.println("				<tr>");
-              client.println("					<th>Sensor</th>");
-              client.println("					<th>Active</th>");
-              client.println("					<th title=\"Sensor value when clean and surrounded by air\">Dry</th>");
-              client.println("					<th title=\"Sensor value when submerged in water\">Wet</th>");
-              client.println("					<th>Now</th>");
-              client.println("				</tr>");
-              for (int v = 0; v < sensorPortTotalNumber; v++) {
-                client.println("				<tr align=\"center\">");
-                client.println("					<td>GPIO " + String(sensorPort[v]) + "</td>");
-                client.println("					<td><input type=\"checkbox\" name=\"gpio" + String(sensorPort[v]) + "\" value=\"1\"" + String(activeSensor[v] ? " checked" : "") + "></td>");
-                client.println("					<td title=\"Sensor value when clean and surrounded by air\"><input name=\"gpiodry" + String(sensorPort[v]) + "\" size=\"5\" value=\"" + String(sensorDryHumidity[v]) + "\"></td>");
-                client.println("					<td title=\"Sensor value when submerged in water\"><input name=\"gpiowet" + String(sensorPort[v]) + "\" size=\"5\" value=\"" + String(sensorWetHumidity[v]) + "\"></td>");
-                client.println("					<td><span id=\"h" + String(sensorPort[v]) + "\">X</span></td>");
-                client.println("				</tr>");
-              }
-              client.println("			</table>");
-              client.println("			<br>");
-              client.println("			<table>");
-              client.println("				<tr title=\"When reaching or exceeding this humidity level cyclic pumping will be deactivated for mold prevention until the lower level is reached.\">");
-              client.println("					<td>Upper hysteresis level:</td>");
-              client.println("					<td><input name=\"threshold1\" size=\"5\" value=\"" + String(humidityThreshold1) + "\">&nbsp;% &nbsp; (Now: <span id=\"ho\">X</span> %)</td>");
-              client.println("				</tr>");
-              client.println("				<tr title=\"When reaching or undercutting this humidity level cyclic pumping will be activated until the upper level is reached.\">");
-              client.println("					<td>Lower hysteresis level:</td>");
-              client.println("					<td><input name=\"threshold2\" size=\"5\" value=\"" + String(humidityThreshold2) + "\">&nbsp;%</td>");
-              client.println("					<td title=\"Switch current direction of humidity hysteresis. See Debug page and debug level >= INFO for state changes.\"><a href=\"/S\">Switch</a></td>");
-              client.println("				</tr>");
-              client.println("				<tr title=\"Time the pump will be activated per pump cycle (or when testing) in seconds.\">");
-              client.println("					<td>Pump runtime:</td>");
-              client.println("					<td><input name=\"pumptime\" size=\"5\" value=\"" + String(pumpRuntimeInSeconds) + "\">&nbsp;s</td>");
-              client.println("				</tr>");
-              client.println("				<tr title=\"Minimum delay between the starts of two pump activations (not including pump test) in minutes.\">");
-              client.println("					<td>Pump delay:</td>");
-              client.println("					<td><input name=\"pumpdelay\" size=\"5\" value=\"" + String(pumpDelayInMinutes) + "\">&nbsp;m</td>");
-              client.println("				</tr>");
-              client.println("				<tr title=\"This value determines if the water supply is empty. It does so by measuring the electric current of the pump which is way lower when no water is pumped. Set this value to somewhere in between the current when pumping water and when running dry.\">");
-              client.println("					<td>Water detection:</td>");
-              client.println("					<td><input name=\"drypump\" size=\"5\" value=\"" + String(dryWetPumpBorderValue) + "\">&nbsp;mA &nbsp; (Last: <span id=\"pc\">X</span> mA)</td>");
-              client.println("					<td><a href=\"/T\">Test</a></td>");
-              client.println("				</tr>");
-              client.println("				<tr title=\"This URL will be called when there is no more water and the pump is running dry.\">");
-              client.println("					<td>Empty warning to:</td>");
-              client.println("					<td><input name=\"emptyUrl\" maxlength=\"255\" size=\"40\" value=\"" + String(emptyWaterURL) + "\">&nbsp;</td>");
-              client.println("					<td><a href=\"/E\">Test</a></td>");
-              client.println("				</tr>");
-              client.println("				<tr title=\"This URL will be called cyclically to send the current humidity value to e.g. a database.\">");
-              client.println("					<td>Status reports to:</td>");
-              client.println("					<td><input name=\"reportURL\" maxlength=\"255\" size=\"40\" value=\"" + String(reportURL) + "\">&nbsp;</td>");
-              client.println("					<td><a href=\"/R\">Test</a></td>");
-              client.println("				</tr>");
-              client.println("				<tr>");
-              client.println("					<td>Debug Level</td>");
-              client.println("					<td>");
-              client.println("						<select name=\"debugLevel\">");
-              client.println("							<option value=\"" + String(DEBUG_ERROR) + "\" " + (debugLevel == DEBUG_ERROR ? " selected=\"true\"" : "") + ">Error</option>");
-              client.println("							<option value=\"" + String(DEBUG_WARN) + "\" " + (debugLevel == DEBUG_WARN ? " selected=\"true\"" : "") + ">Warn</option>");
-              client.println("							<option value=\"" + String(DEBUG_INFO) + "\" " + (debugLevel == DEBUG_INFO ? " selected=\"true\"" : "") + ">Info</option>");
-              client.println("							<option value=\"" + String(DEBUG_VERBOSE) + "\" " + (debugLevel == DEBUG_VERBOSE ? " selected=\"true\"" : "") + ">Verbose</option>");
-              client.println("							<option value=\"" + String(DEBUG_DEBUG) + "\" " + (debugLevel == DEBUG_DEBUG ? " selected=\"true\"" : "") + ">Debug</option>");
-              client.println("							<option value=\"" + String(DEBUG_TRACE) + "\" " + (debugLevel == DEBUG_TRACE ? " selected=\"true\"" : "") + ">Trace</option>");
-              client.println("						</select>");
-              client.println("						&nbsp; &nbsp; &nbsp;");
-              client.println("						<span title=\"Debugging informationen will be transmitted additionally to the serial interface using 115200 Baud.\">");
-              client.println("							Serial Debug");
-              client.println("							<input type=\"checkbox\" name=\"serialDebug\"" + String(serialDebug ? " checked" : "") + ">");
-              client.println("						</span>");
-              client.println("					</td>");
-              client.println("				</tr>");
-              client.println("				<tr>");
-              client.println("					<td colspan=\"2\" align=\"center\"><input type=\"submit\" value=\"save\"></td>");
-              client.println("					<td><a href=\"/Da\">Debug</a></td>");
-              client.println("				</tr>");
-              client.println("			</table>");
-              client.println("		</form>");
-              client.println("		<p>");
-              client.println("			<a href=\"/H\">Sensor values</a> &nbsp; <a href=\"/O\">Average humidity</a> &nbsp; <a href=\"/P\">Pump current</a> &nbsp; <a href=\"/JQ.js\">JQuery</a>");
-              client.println("		</p>");
-              client.println("		<p>");
-              client.println("			<small><a href=\"https://github.com/Joghurt/Plantcare/\" target=\"_blank\">https://github.com/Joghurt/Plantcare/</a></small>");
-              client.println("		</p>");
-              client.println("	</td></tr></table>");
-              client.println("</body>");
-              client.println("</html>");
+              page = PAGE_DEFAULT;
+              break;  // Exit while() loop
             }
-            page = PAGE_DEFAULT;
-            break;  // Exit while() loop
           } else {
             currentLine = "";
+            lineLength = 0;
           }
         } else if (c != '\r') {
           currentLine += c;
         }
       }
     }
+    page = PAGE_DEFAULT;
     client.stop();
     debugln(DEBUG_DEBUG, "Client Disconnected.");
   }

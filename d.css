@@ -1,0 +1,56 @@
+/* Easter egg: Opening this file will automatically select it for use in the frontend after page reload */
+body {
+     color: #3a3;
+     background: #efe;
+}
+a {
+     color: #383;
+}
+a:hover, a:focus {
+     color: #4a4;
+}
+.panel {
+     border: 1px solid #bdb;
+}
+.panel>label {
+     background: #efe;
+}
+.form-wrapper label {
+     background: #efe;
+}
+input.form-control, select.form-control {
+     border: 1px solid #383;
+     color: #362;
+}
+.checkbox:has(> label) {
+     border: 1px solid #383;
+}
+.form-control {
+     border: 1px solid #bdb;
+     color: #383;
+}
+.form-control:focus, .checkbox:has(input[type=checkbox]:focus) {
+     border: 1px solid #5c5;
+}
+button {
+     background: #383;
+     color: #efe;
+}
+.smallbutton {
+     background: #383;
+     color: #efe;
+}
+.smallbutton:hover, .smallbutton:focus, button:hover, button:focus {
+     background: #4a4;
+     color: #efe;
+}
+.checkbox input {
+     accent-color: #383;
+}
+.checkbox input:not(:checked) {
+     opacity: 0.5;
+}
+select option {
+     background: #efe;
+     color: #362;
+}
