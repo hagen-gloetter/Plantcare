@@ -5,7 +5,7 @@
 * Automatically switches to Push button WPS ( https://en.wikipedia.org/wiki/Wi-Fi_Protected_Setup ) within 40 seconds of not being able to connect to any Wifi network on cold start, e.g. on first use.
 * Can be configured via Web browser:
 
-<center><img src="https://github.com/Joghurt/Plantcare/blob/main/screenshot.png"></center>
+<center><img src="https://raw.githubusercontent.com/Joghurt/Plantcare/refs/heads/main/screenshot.png"></center>
 
 ## Necessary Hardware
 To build this you need an ESP32 (e.g. https://www.amazon.de/dp/B0D9LFM1MG ) as well as a humidity sensor, relais and pump (e.g. https://www.amazon.de/dp/B0814HXWVV ), a 3.9 Ohm resistor, a 47uF capacitor and maybe additional sensors (e.g. https://www.amazon.de/dp/B08GCRZVSR ). Also get a large USB power adapter that ideally uses USB-C and a good cable.
