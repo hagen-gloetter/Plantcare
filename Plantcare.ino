@@ -87,9 +87,9 @@ unsigned long startOfMainLoopMillis, lastMillis60s, startPumpMillis, lastPumpSta
 int page, subpage;
 bool checkWifiConnectionFlag = true, humidityThresholdHysteresisFalling, serialDebug, serialDebugActive;
 String ssid, pwd, emptyWaterURL, reportURL, stylesheet;
-int humidityThreshold1, humidityThreshold2, pumpDelayInMinutes, dryWetPumpBorderValue;
-double pumpRuntimeInSeconds;
-int currentPumpCurrentValue, lastPumpCurrentValue = 0;
+int humidityThreshold1, humidityThreshold2, pumpDelay1InMinutes, pumpDelayNInMinutes, dryWetPumpBorderValue;
+double pumpRuntime1InSeconds, pumpRuntimeNInSeconds;
+int pumpCycleIndex, currentPumpCurrentValue, lastPumpCurrentValue = 0;
 #define DEBUG_BUFFER_SIZE 1000
 String debugBufferArray[DEBUG_BUFFER_SIZE];
 String debugBufferLine;
@@ -196,8 +196,10 @@ void setup() {
   pwd = prefs.getString("password");
   humidityThreshold1 = prefs.getInt("threshold1");
   humidityThreshold2 = prefs.getInt("threshold2");
-  pumpRuntimeInSeconds = prefs.getDouble("pumptime");
-  pumpDelayInMinutes = prefs.getInt("pumpdelay");
+  pumpRuntime1InSeconds = prefs.getDouble("pumptime1");
+  pumpDelay1InMinutes = prefs.getInt("pumpdelay1");
+  pumpRuntimeNInSeconds = prefs.getDouble("pumptimeN");
+  pumpDelayNInMinutes = prefs.getInt("pumpdelayN");
   dryWetPumpBorderValue = prefs.getInt("drypump");
   emptyWaterURL = prefs.getString("emptyUrl");
   reportURL = prefs.getString("reportURL");
@@ -218,13 +220,21 @@ void setup() {
     humidityThreshold2 = 50;      // Dry: ~673, Submerged: ~264 absolute
     prefs.putInt("threshold2", humidityThreshold2);
   }
-  if (isnan(pumpRuntimeInSeconds)) {
-    pumpRuntimeInSeconds = 0.8;
-    prefs.putDouble("pumptime", pumpRuntimeInSeconds);
+  if (isnan(pumpRuntime1InSeconds)) {
+    pumpRuntime1InSeconds = 2.0;
+    prefs.putDouble("pumptime1", pumpRuntime1InSeconds);
   }
-  if (pumpDelayInMinutes == 0) {
-    pumpDelayInMinutes = 150;
-    prefs.putInt("pumpdelay", pumpDelayInMinutes);
+  if (pumpDelay1InMinutes == 0) {
+    pumpDelay1InMinutes = 180;
+    prefs.putInt("pumpdelay1", pumpDelay1InMinutes);
+  }
+  if (isnan(pumpRuntimeNInSeconds)) {
+    pumpRuntimeNInSeconds = 0.8;
+    prefs.putDouble("pumptimeN", pumpRuntimeNInSeconds);
+  }
+  if (pumpDelayNInMinutes == 0) {
+    pumpDelayNInMinutes = 120;
+    prefs.putInt("pumpdelayN", pumpDelayNInMinutes);
   }
   if (dryWetPumpBorderValue == 0) {
     dryWetPumpBorderValue = 250;  // Dry: ~130 mA, Submerged: ~397 Ah // TODO
@@ -283,7 +293,7 @@ void loop() {
 
   unsigned long currentMillis = millis();
   // Pump mode hysteresis for mold prevention - only check for switching down after pump cooldown!
-  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThreshold1 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + pumpDelayInMinutes * 60000)) {
+  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThreshold1 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex == 0 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or above upper threshold (" + String(humidityThreshold1) + "), switching to falling mode");
     humidityThresholdHysteresisFalling = true;
@@ -291,6 +301,7 @@ void loop() {
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or below lower threshold (" + String(humidityThreshold2) + "), switching to rising mode");
     humidityThresholdHysteresisFalling = false;
+    pumpCycleIndex = 0;
   }
 
   currentMillis = millis();
@@ -312,7 +323,7 @@ void loop() {
   }
 
   currentMillis = millis();
-  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold1 && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + pumpDelayInMinutes * 60000)) {  // Only after average warmup
+  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold1 && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex == 0 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {  // Only after average warmup
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is lower than upper threshold (" + String(humidityThreshold1) + "), starting pump");
     startPump();
@@ -324,8 +335,9 @@ void loop() {
   }
 
   currentMillis = millis();
-  if (startPumpMillis != 0 && (currentMillis - startPumpMillis > pumpRuntimeInSeconds * 1000 || currentMillis < startPumpMillis)) {  // Force switch off pump in case of timer overflow (every ~52 days)
+  if (startPumpMillis != 0 && (currentMillis - startPumpMillis > (pumpCycleIndex == 0 ? pumpRuntime1InSeconds : pumpRuntimeNInSeconds) * 1000 || currentMillis < startPumpMillis)) {  // Force switch off pump in case of timer overflow (every ~52 days)
     stopPump();
+    pumpCycleIndex++;  // Only increase after pumping is done
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average current: " + String(currentPumpCurrentValue) + " mA");
     lastPumpCurrentValue = currentPumpCurrentValue;
@@ -352,7 +364,7 @@ void doEmptyWaterWarning() {
     return;
   }
   if (WiFi.status() == WL_CONNECTED) {
-    debugln(DEBUG_DEBUG, "Request: " + emptyWaterURL);
+    debugln(DEBUG_VERBOSE, "Request: " + emptyWaterURL);
     HTTPClient http;
     http.begin(String(emptyWaterURL));
     int httpResponseCode = http.GET();
@@ -372,9 +384,12 @@ void doStatusReporting() {
     return;
   }
   if (WiFi.status() == WL_CONNECTED) {
+    String tmpReportUrl = reportURL + "?oah=" + String(overallAverageHumidity) + "&t1=" + String(humidityThreshold1) + "&t2=" + String(humidityThreshold2);
+    debugln(DEBUG_VERBOSE, "Request: " + tmpReportUrl);
     HTTPClient http;
-    http.begin(String(reportURL) + "?oah=" + String(overallAverageHumidity) + "&t1=" + String(humidityThreshold1) + "&t2=" + String(humidityThreshold2));
+    http.begin(tmpReportUrl);
     int httpResponseCode = http.GET();
+    debugln(DEBUG_VERBOSE, "Response: " + httpResponseCode);
     if (httpResponseCode != 200) {
       debugln(DEBUG_ERROR, "doStatusReporting response code: " + http.getString());
     }
@@ -398,14 +413,14 @@ String getAvgValues() {
 }
 
 void startPump() {
-  debugln(DEBUG_INFO, "Starting Pump");
+  debugln(DEBUG_INFO, "Starting Pump, run " + String(pumpCycleIndex + 1) + " in cycle");
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, LOW);
   startPumpMillis = millis();
   lastPumpStartMillis = startPumpMillis;
 }
 
 void stopPump() {
-  debugln(DEBUG_INFO, "Stopping Pump");
+  debugln(DEBUG_INFO, "Stopping Pump, run " + String(pumpCycleIndex + 1) + " in cycle");
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, HIGH);
   startPumpMillis = 0;
 }
@@ -646,23 +661,31 @@ void webServerReaction() {
             }
 
             humidityThreshold1 = currentLine.substring(currentLine.indexOf("threshold1") + String("threshold1").length() + 1).toInt();
-            humidityThreshold1 = humidityThreshold1 < 1 ? 1 : (humidityThreshold1 > 99 ? 99 : humidityThreshold1);
+            humidityThreshold1 = humidityThreshold1 <= 0 ? 1 : (humidityThreshold1 >= 100 ? 99 : humidityThreshold1);
             prefs.putInt("threshold1", humidityThreshold1);
 
             humidityThreshold2 = currentLine.substring(currentLine.indexOf("threshold2") + String("threshold2").length() + 1).toInt();
-            humidityThreshold2 = humidityThreshold2 < 1 ? 1 : (humidityThreshold2 > 99 ? 99 : humidityThreshold2);
+            humidityThreshold2 = humidityThreshold2 <= 0 ? 1 : (humidityThreshold2 >= 100 ? 99 : humidityThreshold2);
             prefs.putInt("threshold2", humidityThreshold2);
 
-            pumpRuntimeInSeconds = currentLine.substring(currentLine.indexOf("pumptime") + String("pumptime").length() + 1).toDouble();
-            pumpRuntimeInSeconds = pumpRuntimeInSeconds <= 0 ? 1 : (pumpRuntimeInSeconds > 300 ? 300 : pumpRuntimeInSeconds);
-            prefs.putDouble("pumptime", pumpRuntimeInSeconds);
+            pumpRuntime1InSeconds = currentLine.substring(currentLine.indexOf("pumptime1") + String("pumptime1").length() + 1).toDouble();
+            pumpRuntime1InSeconds = pumpRuntime1InSeconds <= 0 ? 1 : (pumpRuntime1InSeconds > 300 ? 300 : pumpRuntime1InSeconds);
+            prefs.putDouble("pumptime1", pumpRuntime1InSeconds);
 
-            pumpDelayInMinutes = currentLine.substring(currentLine.indexOf("pumpdelay") + String("pumpdelay").length() + 1).toInt();
-            pumpDelayInMinutes = pumpDelayInMinutes < 1 ? 1 : (pumpDelayInMinutes > 1440 ? 1440 : pumpDelayInMinutes);
-            prefs.putInt("pumpdelay", pumpDelayInMinutes);
+            pumpDelay1InMinutes = currentLine.substring(currentLine.indexOf("pumpdelay1") + String("pumpdelay1").length() + 1).toInt();
+            pumpDelay1InMinutes = pumpDelay1InMinutes <= 0 ? 1 : (pumpDelay1InMinutes > 1440 ? 1440 : pumpDelay1InMinutes);
+            prefs.putInt("pumpdelay1", pumpDelay1InMinutes);
+
+            pumpRuntimeNInSeconds = currentLine.substring(currentLine.indexOf("pumptimeN") + String("pumptimeN").length() + 1).toDouble();
+            pumpRuntimeNInSeconds = pumpRuntimeNInSeconds <= 0 ? 1 : (pumpRuntimeNInSeconds > 300 ? 300 : pumpRuntimeNInSeconds);
+            prefs.putDouble("pumptimeN", pumpRuntimeNInSeconds);
+
+            pumpDelayNInMinutes = currentLine.substring(currentLine.indexOf("pumpdelayN") + String("pumpdelayN").length() + 1).toInt();
+            pumpDelayNInMinutes = pumpDelayNInMinutes <= 0 ? 1 : (pumpDelayNInMinutes > 1440 ? 1440 : pumpDelayNInMinutes);
+            prefs.putInt("pumpdelayN", pumpDelayNInMinutes);
 
             dryWetPumpBorderValue = currentLine.substring(currentLine.indexOf("drypump") + String("drypump").length() + 1).toInt();
-            dryWetPumpBorderValue = dryWetPumpBorderValue < 1 ? 1 : (dryWetPumpBorderValue > 1022 ? 1022 : dryWetPumpBorderValue);
+            dryWetPumpBorderValue = dryWetPumpBorderValue <= 0 ? 1 : (dryWetPumpBorderValue >= 1023 ? 1022 : dryWetPumpBorderValue);
             prefs.putInt("drypump", dryWetPumpBorderValue);
 
             int start, a, b;
@@ -867,13 +890,23 @@ void webServerReaction() {
                 client.println("						</div>");
                 client.println("					</div>");
                 client.println("					<div class=\"form-group\">");
-                client.println("						<div class=\"form-wrapper\" title=\"Time the pump will be activated per pump cycle (or when testing) in seconds.\">");
-                client.println("							<label>Pump runtime (s)</label>");
-                client.println("							<input class=\"form-control\" name=\"pumptime\" size=\"5\" value=\"" + String(pumpRuntimeInSeconds) + "\">");
+                client.println("						<div class=\"form-wrapper\" title=\"Time the pump will be activated on the first activation per pump cycle, in seconds.\">");
+                client.println("							<label>First pump runtime (s)</label>");
+                client.println("							<input class=\"form-control\" name=\"pumptime1\" size=\"5\" value=\"" + String(pumpRuntime1InSeconds) + "\">");
                 client.println("						</div>");
-                client.println("						<div class=\"form-wrapper\" title=\"Minimum delay between the starts of two pump activations (not including pump test) in minutes.\">");
-                client.println("							<label>Pump delay (m)</label>");
-                client.println("							<input class=\"form-control\" name=\"pumpdelay\" size=\"5\" value=\"" + String(pumpDelayInMinutes) + "\">");
+                client.println("						<div class=\"form-wrapper\" title=\"Delay between the first and the second pump activation per cycle (not including pump test), in minutes.\">");
+                client.println("							<label>First pump delay (m)</label>");
+                client.println("							<input class=\"form-control\" name=\"pumpdelay1\" size=\"5\" value=\"" + String(pumpDelay1InMinutes) + "\">");
+                client.println("						</div>");
+                client.println("					</div>");
+                client.println("					<div class=\"form-group\">");
+                client.println("						<div class=\"form-wrapper\" title=\"Time the pump will be activated for the second and all following pump activations per cycle (or when testing), in seconds.\">");
+                client.println("							<label>Other pump runtimes (s)</label>");
+                client.println("							<input class=\"form-control\" name=\"pumptimeN\" size=\"5\" value=\"" + String(pumpRuntimeNInSeconds) + "\">");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\" title=\"Minimum delay between the starts of two pump activations (not including pump test), in minutes.\">");
+                client.println("							<label>Other pump delays (m)</label>");
+                client.println("							<input class=\"form-control\" name=\"pumpdelayN\" size=\"5\" value=\"" + String(pumpDelayNInMinutes) + "\">");
                 client.println("						</div>");
                 client.println("					</div>");
                 client.println("					<div class=\"form-group\">");
