@@ -293,7 +293,7 @@ void loop() {
 
   unsigned long currentMillis = millis();
   // Pump mode hysteresis for mold prevention - only check for switching down after pump cooldown!
-  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThreshold1 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex == 0 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {
+  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThreshold1 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or above upper threshold (" + String(humidityThreshold1) + "), switching to falling mode");
     humidityThresholdHysteresisFalling = true;
@@ -323,9 +323,10 @@ void loop() {
   }
 
   currentMillis = millis();
-  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold1 && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex == 0 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {  // Only after average warmup
+  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold1 && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {  // Only after average warmup
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is lower than upper threshold (" + String(humidityThreshold1) + "), starting pump");
+    pumpCycleIndex++;  // Increase before pumping starts or log output will be wrong
     startPump();
   }
 
@@ -335,9 +336,8 @@ void loop() {
   }
 
   currentMillis = millis();
-  if (startPumpMillis != 0 && (currentMillis - startPumpMillis > (pumpCycleIndex == 0 ? pumpRuntime1InSeconds : pumpRuntimeNInSeconds) * 1000 || currentMillis < startPumpMillis)) {  // Force switch off pump in case of timer overflow (every ~52 days)
+  if (startPumpMillis != 0 && (currentMillis - startPumpMillis > (pumpCycleIndex <= 1 ? pumpRuntime1InSeconds : pumpRuntimeNInSeconds) * 1000 || currentMillis < startPumpMillis)) {  // Force switch off pump in case of timer overflow (every ~52 days)
     stopPump();
-    pumpCycleIndex++;  // Only increase after pumping is done
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average current: " + String(currentPumpCurrentValue) + " mA");
     lastPumpCurrentValue = currentPumpCurrentValue;
@@ -413,14 +413,14 @@ String getAvgValues() {
 }
 
 void startPump() {
-  debugln(DEBUG_INFO, "Starting Pump, run " + String(pumpCycleIndex + 1) + " in cycle");
+  debugln(DEBUG_INFO, "Starting Pump, run " + String(pumpCycleIndex) + " in cycle");
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, LOW);
   startPumpMillis = millis();
   lastPumpStartMillis = startPumpMillis;
 }
 
 void stopPump() {
-  debugln(DEBUG_INFO, "Stopping Pump, run " + String(pumpCycleIndex + 1) + " in cycle");
+  debugln(DEBUG_INFO, "Stopping Pump, run " + String(pumpCycleIndex) + " in cycle");
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, HIGH);
   startPumpMillis = 0;
 }
