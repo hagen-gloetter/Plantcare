@@ -29,6 +29,8 @@
 #include "ssidAndPassword.h"
 /* ------------------------------------------------------------------------ */
 
+#define LED_BUILTIN 2
+
 #define HUMIDITY_SENSOR_GPIO_NUMBERS 34, 35, 39
 #define PUMP_ACTIVE_GPIO_NUMBER 33
 #define PUMP_CURRENT_GPIO_NUMBER 36
