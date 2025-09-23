@@ -29,7 +29,9 @@
 #include "ssidAndPassword.h"
 /* ------------------------------------------------------------------------ */
 
+#ifndef LED_BUILTIN
 #define LED_BUILTIN 2
+#endif
 
 #define HUMIDITY_SENSOR_GPIO_NUMBERS 34, 35, 39
 #define PUMP_ACTIVE_GPIO_NUMBER 33
@@ -261,7 +263,7 @@ void setup() {
 
   if (!connectToWiFi()) {
     digitalWrite(LED_BUILTIN, HIGH);
-    WiFi.disconnect(true, true);  // Wipe credentials or it look like it won't work!
+    WiFi.disconnect(true, true);  // Wipe credentials or it looks like it won't work!
     wpsSetup();
     checkWifiConnectionFlag = false;
   }
