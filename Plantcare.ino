@@ -1,9 +1,9 @@
 /* ---------------------------------------------------------------------------
  * Needs Boards
- *	"esp32 by Espressif Systems" https://github.com/espressif/arduino-esp32
+ *	"esp32" by Espressif Systems ( https://github.com/espressif/arduino-esp32 )
  * Needs Libraries
- *	"URLCode by XieXuan" https://github.com/MR-XieXuan/URLCode_for_Arduino
- *	"incbin by Dale Weiler" https://github.com/AlexIII/incbin-arduino
+ *	"URLCode" by XieXuan ( https://github.com/MR-XieXuan/URLCode_for_Arduino )
+ *	"incbin" by Dale Weiler ( https://github.com/AlexIII/incbin-arduino )
  * Tested on
  *	"WEMOS D1 MINI ESP32"
  * Fritzing parts
@@ -55,14 +55,15 @@
 #define PAGE_DEFAULT_POST2 2
 #define PAGE_HUMIDITYVAL 3
 #define PAGE_HUMIDITY 4
-#define PAGE_PUMPVAL 5
-#define PAGE_JQUERY 6
-#define PAGE_STYLE 7
-#define PAGE_DSTYLE 8
-#define PAGE_NSTYLE 9
-#define PAGE_DEBUG 10
-#define PAGE_DEBUG_BODY_PART 11
-#define PAGE_DEBUG_BODY_FULL 12
+#define PAGE_MODE 5
+#define PAGE_PUMPVAL 6
+#define PAGE_JQUERY 7
+#define PAGE_STYLE 8
+#define PAGE_DSTYLE 9
+#define PAGE_NSTYLE 10
+#define PAGE_DEBUG 11
+#define PAGE_DEBUG_BODY_PART 12
+#define PAGE_DEBUG_BODY_FULL 13
 
 #define DEBUG_ERROR 1
 #define DEBUG_WARN 2
@@ -91,7 +92,7 @@ unsigned long startOfMainLoopMillis, lastMillis60s, startPumpMillis, lastPumpSta
 int page, subpage;
 bool checkWifiConnectionFlag = true, humidityThresholdHysteresisFalling, serialDebug, serialDebugActive;
 String ssid, pwd, emptyWaterURL, reportURL, stylesheet;
-int humidityThreshold1, humidityThreshold2, pumpDelay1InMinutes, pumpDelayNInMinutes, dryWetPumpBorderValue;
+int humidityThresholdUpper, humidityThresholdLower, pumpDelay1InMinutes, pumpDelayNInMinutes, dryWetPumpBorderValue;
 double pumpRuntime1InSeconds, pumpRuntimeNInSeconds;
 int pumpCycleIndex, currentPumpCurrentValue, lastPumpCurrentValue = 0;
 #define DEBUG_BUFFER_SIZE 1000
@@ -198,8 +199,8 @@ void setup() {
 
   ssid = prefs.getString("ssid");
   pwd = prefs.getString("password");
-  humidityThreshold1 = prefs.getInt("threshold1");
-  humidityThreshold2 = prefs.getInt("threshold2");
+  humidityThresholdUpper = prefs.getInt("threshold1");
+  humidityThresholdLower = prefs.getInt("threshold2");
   pumpRuntime1InSeconds = prefs.getDouble("pumptime1");
   pumpDelay1InMinutes = prefs.getInt("pumpdelay1");
   pumpRuntimeNInSeconds = prefs.getDouble("pumptimeN");
@@ -216,20 +217,20 @@ void setup() {
     prefs.putBool(portname, true);
     activeSensor[0] = prefs.getBool(portname);
   }
-  if (humidityThreshold1 == 0) {  // Default values in case no Settings have been saved, yet
-    humidityThreshold1 = 70;      // Dry: ~673, Submerged: ~264 absolute, No sensor: 0, My plant: 380(71%)
-    prefs.putInt("threshold1", humidityThreshold1);
+  if (humidityThresholdUpper == 0) {  // Default values in case no Settings have been saved, yet
+    humidityThresholdUpper = 70;      // Dry: ~673, Submerged: ~264 absolute, No sensor: 0, My plant: 380(71%)
+    prefs.putInt("threshold1", humidityThresholdUpper);
   }
-  if (humidityThreshold2 == 0) {  // Default values in case no Settings have been saved, yet
-    humidityThreshold2 = 50;      // Dry: ~673, Submerged: ~264 absolute
-    prefs.putInt("threshold2", humidityThreshold2);
+  if (humidityThresholdLower == 0) {  // Default values in case no Settings have been saved, yet
+    humidityThresholdLower = 50;      // Dry: ~673, Submerged: ~264 absolute
+    prefs.putInt("threshold2", humidityThresholdLower);
   }
   if (isnan(pumpRuntime1InSeconds)) {
-    pumpRuntime1InSeconds = 2.0;
+    pumpRuntime1InSeconds = 7.0;
     prefs.putDouble("pumptime1", pumpRuntime1InSeconds);
   }
   if (pumpDelay1InMinutes == 0) {
-    pumpDelay1InMinutes = 180;
+    pumpDelay1InMinutes = 360;
     prefs.putInt("pumpdelay1", pumpDelay1InMinutes);
   }
   if (isnan(pumpRuntimeNInSeconds)) {
@@ -237,11 +238,11 @@ void setup() {
     prefs.putDouble("pumptimeN", pumpRuntimeNInSeconds);
   }
   if (pumpDelayNInMinutes == 0) {
-    pumpDelayNInMinutes = 120;
+    pumpDelayNInMinutes = 180;
     prefs.putInt("pumpdelayN", pumpDelayNInMinutes);
   }
   if (dryWetPumpBorderValue == 0) {
-    dryWetPumpBorderValue = 250;  // Dry: ~130 mA, Submerged: ~397 Ah // TODO
+    dryWetPumpBorderValue = 250;  // Dry: ~130 mA, Submerged: ~430 Ah // TODO
     prefs.putInt("drypump", dryWetPumpBorderValue);
   }
   if (emptyWaterURL == NULL) {
@@ -267,6 +268,9 @@ void setup() {
     wpsSetup();
     checkWifiConnectionFlag = false;
   }
+
+  if (overallAverageHumidity > humidityThresholdLower && overallAverageHumidity < humidityThresholdUpper)
+    pumpCycleIndex = 1; // In case of being between the two thresholds on startup skip the long pumping run and start directly with the short ones
 }
 
 void loop() {
@@ -297,13 +301,13 @@ void loop() {
 
   unsigned long currentMillis = millis();
   // Pump mode hysteresis for mold prevention - only check for switching down after pump cooldown!
-  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThreshold1 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {
+  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThresholdUpper && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {
     debugln(DEBUG_TRACE, __LINE__);
-    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or above upper threshold (" + String(humidityThreshold1) + "), switching to falling mode");
+    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or above upper threshold (" + String(humidityThresholdUpper) + "), switching to falling mode");
     humidityThresholdHysteresisFalling = true;
-  } else if (humidityThresholdHysteresisFalling && overallAverageHumidity <= humidityThreshold2) {
+  } else if (humidityThresholdHysteresisFalling && overallAverageHumidity <= humidityThresholdLower) {
     debugln(DEBUG_TRACE, __LINE__);
-    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or below lower threshold (" + String(humidityThreshold2) + "), switching to rising mode");
+    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or below lower threshold (" + String(humidityThresholdLower) + "), switching to rising mode");
     humidityThresholdHysteresisFalling = false;
     pumpCycleIndex = 0;
   }
@@ -327,10 +331,10 @@ void loop() {
   }
 
   currentMillis = millis();
-  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThreshold1 && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {  // Only after average warmup
+  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThresholdUpper && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {  // Only after average warmup
     debugln(DEBUG_TRACE, __LINE__);
-    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is lower than upper threshold (" + String(humidityThreshold1) + "), starting pump");
-    pumpCycleIndex++;  // Increase before pumping starts or log output will be wrong
+    pumpCycleIndex++;  // Increase before pumping starts or log output, or log output will be wrong
+    debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is lower than upper threshold (" + String(humidityThresholdUpper) + "), starting pump for " + String(pumpCycleIndex <= 1 ? pumpRuntime1InSeconds : pumpRuntimeNInSeconds) + " seconds");
     startPump();
   }
 
@@ -388,7 +392,7 @@ void doStatusReporting() {
     return;
   }
   if (WiFi.status() == WL_CONNECTED) {
-    String tmpReportUrl = reportURL + "?oah=" + String(overallAverageHumidity) + "&t1=" + String(humidityThreshold1) + "&t2=" + String(humidityThreshold2);
+    String tmpReportUrl = reportURL + "?oah=" + String(overallAverageHumidity) + "&t1=" + String(humidityThresholdUpper) + "&t2=" + String(humidityThresholdLower);
     debugln(DEBUG_VERBOSE, "Request: " + tmpReportUrl);
     HTTPClient http;
     http.begin(tmpReportUrl);
@@ -597,6 +601,9 @@ void webServerReaction() {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Humidity all values block: " + currentLine);
             page = PAGE_HUMIDITYVAL;
             subpage = -1;
+          } else if (currentLine.startsWith("GET /M")) {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Current hysteresis mode: " + currentLine);
+            page = PAGE_MODE;
           } else if (currentLine.startsWith("GET /jq.js")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> JQuery file: " + currentLine);
             page = PAGE_JQUERY;
@@ -619,6 +626,9 @@ void webServerReaction() {
           } else if (currentLine.startsWith("GET /O")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Average humidity block: " + currentLine);
             page = PAGE_HUMIDITY;
+          } else if (currentLine.startsWith("GET /M")) {
+            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Current hysteresis mode: " + currentLine);
+            page = PAGE_MODE;
           } else if (currentLine.startsWith("GET /P")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Pump current block: " + currentLine);
             page = PAGE_PUMPVAL;
@@ -664,13 +674,13 @@ void webServerReaction() {
               refreshPagesMillis = millis();
             }
 
-            humidityThreshold1 = currentLine.substring(currentLine.indexOf("threshold1") + String("threshold1").length() + 1).toInt();
-            humidityThreshold1 = humidityThreshold1 <= 0 ? 1 : (humidityThreshold1 >= 100 ? 99 : humidityThreshold1);
-            prefs.putInt("threshold1", humidityThreshold1);
+            humidityThresholdUpper = currentLine.substring(currentLine.indexOf("threshold1") + String("threshold1").length() + 1).toInt();
+            humidityThresholdUpper = humidityThresholdUpper <= 0 ? 1 : (humidityThresholdUpper >= 100 ? 99 : humidityThresholdUpper);
+            prefs.putInt("threshold1", humidityThresholdUpper);
 
-            humidityThreshold2 = currentLine.substring(currentLine.indexOf("threshold2") + String("threshold2").length() + 1).toInt();
-            humidityThreshold2 = humidityThreshold2 <= 0 ? 1 : (humidityThreshold2 >= 100 ? 99 : humidityThreshold2);
-            prefs.putInt("threshold2", humidityThreshold2);
+            humidityThresholdLower = currentLine.substring(currentLine.indexOf("threshold2") + String("threshold2").length() + 1).toInt();
+            humidityThresholdLower = humidityThresholdLower <= 0 ? 1 : (humidityThresholdLower >= 100 ? 99 : humidityThresholdLower);
+            prefs.putInt("threshold2", humidityThresholdLower);
 
             pumpRuntime1InSeconds = currentLine.substring(currentLine.indexOf("pumptime1") + String("pumptime1").length() + 1).toDouble();
             pumpRuntime1InSeconds = pumpRuntime1InSeconds <= 0 ? 1 : (pumpRuntime1InSeconds > 300 ? 300 : pumpRuntime1InSeconds);
@@ -745,6 +755,10 @@ void webServerReaction() {
                 client.println("Content-type:application/json;charset=utf-8");
                 client.println();
                 client.println(overallAverageHumidity);
+              } else if (page == PAGE_MODE) {
+                client.println("Content-type:text/plain;charset=utf-8");
+                client.println();
+                client.print(humidityThresholdHysteresisFalling ? "Falling" : "Rising");
               } else if (page == PAGE_PUMPVAL) {
                 client.println("Content-type:application/json;charset=utf-8");
                 client.println();
@@ -829,6 +843,7 @@ void webServerReaction() {
                 client.println("		function a() {");
                 client.println("			$(\"#pc\").load(\"/P\");");
                 client.println("			$(\"#ho\").load(\"/O\");");
+                client.println("			$(\"#mo\").load(\"/M\");");
                 for (int v = 0; v < sensorPortTotalNumber; v++) {
                   client.println("			$(\"#h" + String(sensorPort[v]) + "\").load(\"/H?" + String(v) + "\");");
                 }
@@ -877,20 +892,28 @@ void webServerReaction() {
                 client.println("					<div class=\"form-group\">");
                 client.println("						<div class=\"form-wrapper\" title=\"When reaching or exceeding this humidity level cyclic pumping will be deactivated for mold prevention until the lower level is reached.\">");
                 client.println("							<label>Upper hysteresis level (%)</label>");
-                client.println("							<input class=\"form-control\" name=\"threshold1\" size=\"5\" value=\"" + String(humidityThreshold1) + "\">");
+                client.println("							<input class=\"form-control\" name=\"threshold1\" size=\"5\" value=\"" + String(humidityThresholdUpper) + "\">");
                 client.println("						</div>");
                 client.println("						<div class=\"form-wrapper\" title=\"When reaching or undercutting this humidity level cyclic pumping will be activated until the upper level is reached.\">");
                 client.println("							<label>Lower hysteresis level (%)</label>");
-                client.println("							<input class=\"form-control\" name=\"threshold2\" size=\"5\" value=\"" + String(humidityThreshold2) + "\">");
+                client.println("							<input class=\"form-control\" name=\"threshold2\" size=\"5\" value=\"" + String(humidityThresholdLower) + "\">");
                 client.println("						</div>");
                 client.println("						<div class=\"form-group\">");
-                client.println("							<div class=\"form-wrapper\">");
+                client.println("							<div class=\"form-wrapper\" title=\"The current relative humidity level\">");
                 client.println("								<label>Now (%)</label>");
                 client.println("								<span class=\"form-control\" id=\"ho\">X</span>");
                 client.println("							</div>");
-                client.println("							<!-- div class=\"form-wrapper\">");
-                client.println("								<a href=\"/S\"><button class=\"smallbutton\">Switch</button></a>");
-                client.println("							</div -->");
+                client.println("							<div class=\"form-wrapper\" title=\"Shows on which leg of the hysteresis loop the system currently is running on\">");
+                client.println("								<label>Mode</label>");
+                client.println("								<span class=\"form-control\" id=\"mo\">X</span>");
+                client.println("							</div>");
+                client.println("							<!--div class=\"form-wrapper\">");
+                client.println("								<a href=\"/S\" class=\"smallbutton\">");
+                client.println("									<div class=\"smallbutton-wrapper\">");
+                client.println("										Switch");
+                client.println("									</div>");
+                client.println("								</a>");
+                client.println("							</div-->");
                 client.println("						</div>");
                 client.println("					</div>");
                 client.println("					<div class=\"form-group\">");
@@ -996,7 +1019,7 @@ void webServerReaction() {
                 client.println("					<div class=\"form-wrapper\">");
                 client.println("						<button>");
                 client.println("							<input type=\"submit\" value=\"save\">");
-                client.println("							save");
+                client.println("							Save");
                 client.println("						</button>");
                 client.println("					</div>");
                 client.println("				</div>");
@@ -1006,21 +1029,28 @@ void webServerReaction() {
                 client.println("						<div class=\"form-wrapper\">");
                 client.println("							<a href=\"/H\" class=\"smallbutton\">");
                 client.println("								<div class=\"smallbutton-wrapper\">");
-                client.println("									Sensor values");
+                client.println("									Sensor Values");
                 client.println("								</div>");
                 client.println("							</a>");
                 client.println("						</div>");
                 client.println("						<div class=\"form-wrapper\">");
                 client.println("							<a href=\"/O\" class=\"smallbutton\">");
                 client.println("								<div class=\"smallbutton-wrapper\">");
-                client.println("									Average humidity");
+                client.println("									Average Humidity");
+                client.println("								</div>");
+                client.println("							</a>");
+                client.println("						</div>");
+                client.println("						<div class=\"form-wrapper\">");
+                client.println("							<a href=\"/M\" class=\"smallbutton\">");
+                client.println("								<div class=\"smallbutton-wrapper\">");
+                client.println("									Hysteresis Mode");
                 client.println("								</div>");
                 client.println("							</a>");
                 client.println("						</div>");
                 client.println("						<div class=\"form-wrapper\">");
                 client.println("							<a href=\"/P\" class=\"smallbutton\">");
                 client.println("								<div class=\"smallbutton-wrapper\">");
-                client.println("									Pump current");
+                client.println("									Pump Current");
                 client.println("								</div>");
                 client.println("							</a>");
                 client.println("						</div>");
