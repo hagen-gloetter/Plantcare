@@ -58,15 +58,16 @@
 				datasets: [{
 						label: 'Upper Threshold',
 						data: [
-							{t:'<?=$row2['Start']?>', y:<?=$row['Upper']?>},
-							{t:'<?=$row2['End']?>', y:<?=$row['Upper']?>}
+							/* BUG-02 fix: cast numeric values, escape date strings to prevent stored XSS */
+							{t:'<?=htmlspecialchars((string)$row2['Start'],ENT_QUOTES,'UTF-8')?>', y:<?=(float)$row['Upper']?>},
+							{t:'<?=htmlspecialchars((string)$row2['End'],ENT_QUOTES,'UTF-8')?>', y:<?=(float)$row['Upper']?>}
 						],
 						borderColor: 'rgba(255, 0, 0, .5)',
 					}, {
 						label: 'Lower Threshold',
 						data: [
-							{t:'<?=$row2['Start']?>', y:<?=$row['Lower']?>},
-							{t:'<?=$row2['End']?>', y:<?=$row['Lower']?>}
+							{t:'<?=htmlspecialchars((string)$row2['Start'],ENT_QUOTES,'UTF-8')?>', y:<?=(float)$row['Lower']?>},
+							{t:'<?=htmlspecialchars((string)$row2['End'],ENT_QUOTES,'UTF-8')?>', y:<?=(float)$row['Lower']?>}
 						],
 						borderColor: 'rgba(0, 0, 255, .5)',
 					}, {
@@ -75,7 +76,7 @@
 					label: 'Humidity Values',
 					data: [
 <?	foreach (db_query("SELECT Date, Average FROM Humidity WHERE Date > SUBDATE(NOW(), 8) ORDER BY Id")->fetch_all() AS $x) { ?>
-						{t:'<?=$x[0]?>', y:<?=$x[1]?>},
+						{t:'<?=htmlspecialchars((string)$x[0],ENT_QUOTES,'UTF-8')?>', y:<?=(float)$x[1]?>},
 <?	} ?>
 					],
 					borderColor: 'rgba(0, 255, 0, 1)',

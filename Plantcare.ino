@@ -1,16 +1,30 @@
-/* ---------------------------------------------------------------------------
- * Needs Boards
- *	"esp32" by Espressif Systems ( https://github.com/espressif/arduino-esp32 )
- * Needs Libraries
- *	"URLCode" by XieXuan ( https://github.com/MR-XieXuan/URLCode_for_Arduino )
- *	"incbin" by Dale Weiler ( https://github.com/AlexIII/incbin-arduino )
- * Tested on
- *	"WEMOS D1 MINI ESP32"
- * Fritzing parts
- *	ESP32 https://forum.fritzing.org/t/doit-esp32-devkit-v1-30-pin/8443/3
- *	Sensor https://github.com/OgreTransporter/fritzing-parts-extra/
- *	Relais https://forum.fritzing.org/t/kf-301-relay-request/7992/10
- * ------------------------------------------------------------------------ */
+/**
+ * @file Plantcare.ino
+ * @brief Automatic plant watering system for ESP32 (WEMOS D1 MINI ESP32).
+ *
+ * Reads up to three capacitive soil-moisture sensors, controls a relay-driven pump
+ * via a two-threshold hysteresis loop, and reports telemetry to optional HTTP endpoints.
+ * A built-in WiFi web server provides configuration and debug pages.
+ *
+ * @section concurrency Concurrency
+ * WiFiEvent() is called from a separate FreeRTOS task.  Access to shared globals
+ * (ssid, pwd, checkWifiConnectionFlag, debugBuffer*) from that context is not
+ * mutex-protected — see BUG-06.  checkWifiConnectionFlag is declared volatile as a
+ * minimal guard; full correctness would require a FreeRTOS mutex.
+ *
+ * @section build Build
+ * Arduino IDE with Espressif ESP32 board package.
+ * Required libraries: URLCode (XieXuan), incbin (AlexIII).
+ * Tested on WEMOS D1 MINI ESP32.
+ *
+ * @section ownership Ownership
+ * All global state is owned by the main loop task, except where noted.
+ *
+ * Fritzing parts:
+ *   ESP32   https://forum.fritzing.org/t/doit-esp32-devkit-v1-30-pin/8443/3
+ *   Sensor  https://github.com/OgreTransporter/fritzing-parts-extra/
+ *   Relais  https://forum.fritzing.org/t/kf-301-relay-request/7992/10
+ */
 #include <Arduino.h>
 #include <esp_wps.h>
 #include <HTTPClient.h>
@@ -90,7 +104,10 @@ double overallAverageHumidity, lastOverallAverageHumidity;
 WiFiServer server(80);
 unsigned long startOfMainLoopMillis, lastMillis60s, startPumpMillis, lastPumpStartMillis, refreshPagesMillis;
 int page, subpage;
-bool checkWifiConnectionFlag = true, humidityThresholdHysteresisFalling, serialDebug, serialDebugActive;
+// checkWifiConnectionFlag is written from the WiFiEvent FreeRTOS task; volatile prevents
+// the compiler from caching the value in a register (BUG-06 partial mitigation).
+volatile bool checkWifiConnectionFlag = true;
+bool humidityThresholdHysteresisFalling, serialDebug, serialDebugActive;
 String ssid, pwd, emptyWaterURL, reportURL, stylesheet;
 int humidityThresholdUpper, humidityThresholdLower, pumpDelay1InMinutes, pumpDelayNInMinutes, dryWetPumpBorderValue;
 double pumpRuntime1InSeconds, pumpRuntimeNInSeconds;
@@ -151,6 +168,16 @@ template<typename... Args> void debugln(const int level, Args... args) {
   }
 }
 
+/**
+ * @brief Linear interpolation for floating-point values.
+ *
+ * @param x      Input value.
+ * @param in_min Lower bound of input range.
+ * @param in_max Upper bound of input range.
+ * @param out_min Lower bound of output range.
+ * @param out_max Upper bound of output range.
+ * @return Mapped value.  Not clamped — callers must validate ranges.
+ */
 double mapf(const double x, const double in_min, const double in_max, const double out_min, const double out_max) {
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
@@ -166,7 +193,10 @@ void setup() {
   pinMode(PUMP_ACTIVE_GPIO_NUMBER, OUTPUT);
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, HIGH);  // The used relais is LOW active!
 
-  prefs.begin("p");
+  // IMP-02: check NVS initialisation; log on failure and continue with defaults.
+  if (!prefs.begin("p")) {
+    debugln(DEBUG_ERROR, "NVS init failed, all settings will use defaults");
+  }
 
   int numberOfActiveSensors = 0;
   overallAverageHumidity = 0;
@@ -195,7 +225,9 @@ void setup() {
       overallAverageHumidity += mapf(averageHumidity[v], sensorDryHumidity[v], sensorWetHumidity[v], 0, 100);
     }
   }
-  overallAverageHumidity /= numberOfActiveSensors;
+  // BUG-05 fix: guard against division by zero on first boot before any sensor is configured.
+  if (numberOfActiveSensors > 0)
+    overallAverageHumidity /= numberOfActiveSensors;
 
   ssid = prefs.getString("ssid");
   pwd = prefs.getString("password");
@@ -245,11 +277,11 @@ void setup() {
     dryWetPumpBorderValue = 250;  // Dry: ~130 mA, Submerged: ~430 Ah // TODO
     prefs.putInt("drypump", dryWetPumpBorderValue);
   }
-  if (emptyWaterURL == NULL) {
+  if (emptyWaterURL.isEmpty()) {  // BUG-03 fix: .isEmpty() instead of == NULL
     emptyWaterURL = DEFAULT_URL_EMPTY;
     prefs.putString("emptyUrl", emptyWaterURL);
   }
-  if (reportURL == NULL) {
+  if (reportURL.isEmpty()) {  // BUG-03 fix: .isEmpty() instead of == NULL
     reportURL = DEFAULT_URL_STATUS;
     prefs.putString("reportURL", reportURL);
   }
@@ -257,7 +289,7 @@ void setup() {
     debugLevel = DEBUG_INFO;
     prefs.putInt("debugLevel", debugLevel);
   }
-  if (stylesheet == NULL) {
+  if (stylesheet.isEmpty()) {  // BUG-03 fix: .isEmpty() instead of == NULL
     stylesheet = DEFAULT_STYLESHEET;
     prefs.putString("stylesheet", stylesheet);
   }
@@ -295,7 +327,9 @@ void loop() {
       sensorcount++;
     }
   }
-  overallAverageHumidity /= sensorcount;
+  // BUG-05 fix: guard against division by zero if all sensors are somehow inactive.
+  if (sensorcount > 0)
+    overallAverageHumidity /= sensorcount;
 
   debugln(DEBUG_TRACE, __LINE__);
 
@@ -365,6 +399,13 @@ void loop() {
   delay(startPumpMillis == 0 && currentMillis - refreshPagesMillis > 5000 ? 300 : 2);  // React quickly on startup and page load as well as when pump is running
 }
 
+/**
+ * @brief Sends a GET request to emptyWaterURL to signal an empty water tank.
+ *
+ * No-op when emptyWaterURL is unset or still at its default placeholder value.
+ * Side effects: HTTP GET to configured URL.  Blocking up to 5 s (http.setTimeout).
+ * Thread-safety: main task only.
+ */
 void doEmptyWaterWarning() {
   debugln(DEBUG_TRACE, __LINE__);
   if (emptyWaterURL == "" || emptyWaterURL == DEFAULT_URL_EMPTY) {
@@ -375,8 +416,10 @@ void doEmptyWaterWarning() {
     debugln(DEBUG_VERBOSE, "Request: " + emptyWaterURL);
     HTTPClient http;
     http.begin(String(emptyWaterURL));
+    http.setTimeout(5000);  // IMP-01: explicit 5 s timeout; avoids blocking pump control loop.
     int httpResponseCode = http.GET();
-    debugln(DEBUG_VERBOSE, "Response: " + httpResponseCode);
+    // BUG-04 fix: use String() to force string concatenation instead of pointer arithmetic.
+    debugln(DEBUG_VERBOSE, String("Response: ") + httpResponseCode);
     if (httpResponseCode != 200)
       debugln(DEBUG_ERROR, "doEmptyWaterWarning response code: " + http.getString());
     http.end();
@@ -385,6 +428,14 @@ void doEmptyWaterWarning() {
   }
 }
 
+/**
+ * @brief Sends current humidity and threshold values to reportURL.
+ *
+ * Query parameters appended: oah=<avg>, t1=<upper>, t2=<lower>.
+ * No-op when reportURL is unset or still at its default placeholder value.
+ * Side effects: HTTP GET to configured URL.  Blocking up to 5 s (http.setTimeout).
+ * Thread-safety: main task only.
+ */
 void doStatusReporting() {
   debugln(DEBUG_TRACE, __LINE__);
   if (reportURL == "" || reportURL == DEFAULT_URL_STATUS) {
@@ -396,8 +447,10 @@ void doStatusReporting() {
     debugln(DEBUG_VERBOSE, "Request: " + tmpReportUrl);
     HTTPClient http;
     http.begin(tmpReportUrl);
+    http.setTimeout(5000);  // IMP-01: explicit 5 s timeout; avoids blocking pump control loop.
     int httpResponseCode = http.GET();
-    debugln(DEBUG_VERBOSE, "Response: " + httpResponseCode);
+    // BUG-04 fix: use String() to force string concatenation instead of pointer arithmetic.
+    debugln(DEBUG_VERBOSE, String("Response: ") + httpResponseCode);
     if (httpResponseCode != 200) {
       debugln(DEBUG_ERROR, "doStatusReporting response code: " + http.getString());
     }
@@ -407,6 +460,13 @@ void doStatusReporting() {
   }
 }
 
+/**
+ * @brief Returns a JSON-style array string of raw average sensor values.
+ *
+ * Format: "[val0,val1,...]".  Values are the exponentially-smoothed ADC readings
+ * (not %-normalised).  Buffer size is 7 bytes per value.
+ * @return Arduino String containing the array.
+ */
 String getAvgValues() {
   debugln(DEBUG_TRACE, __LINE__);
   char buffer[7];
@@ -420,6 +480,13 @@ String getAvgValues() {
   return retVal + "]";
 }
 
+/**
+ * @brief Activates the pump relay (LOW-active) and records start timestamps.
+ *
+ * Sets startPumpMillis and lastPumpStartMillis to millis().
+ * Side effects: GPIO PUMP_ACTIVE_GPIO_NUMBER driven LOW.
+ * Thread-safety: main task only.
+ */
 void startPump() {
   debugln(DEBUG_INFO, "Starting Pump, run " + String(pumpCycleIndex) + " in cycle");
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, LOW);
@@ -427,16 +494,30 @@ void startPump() {
   lastPumpStartMillis = startPumpMillis;
 }
 
+/**
+ * @brief Deactivates the pump relay and clears startPumpMillis.
+ *
+ * Side effects: GPIO PUMP_ACTIVE_GPIO_NUMBER driven HIGH.
+ * Thread-safety: main task only.
+ */
 void stopPump() {
   debugln(DEBUG_INFO, "Stopping Pump, run " + String(pumpCycleIndex) + " in cycle");
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, HIGH);
   startPumpMillis = 0;
 }
 
+/**
+ * @brief Attempts WiFi connection using stored credentials then ssidAndPassword.h fallback.
+ *
+ * Each attempt waits up to 20 s.  On success: starts HTTP server, configures NTP, blinks LED.
+ * Called from setup() and from doCheckWiFiConnection() in loop().
+ * @return true if connected, false otherwise.
+ */
 // Will only be called from setup() once and in loop IF no connection
 bool connectToWiFi() {
-  // Try the stored values for ssid and password, if any
-  if (ssid != NULL && pwd != NULL) {
+  // BUG-03 fix: prefs.getString() returns "" for missing keys, never NULL.
+  // Use .isEmpty() instead of == NULL to avoid undefined behaviour in String::compareTo.
+  if (!ssid.isEmpty() && !pwd.isEmpty()) {
     debugln(DEBUG_INFO, "Connecting to SSID: " + ssid);
     WiFi.begin(ssid, pwd);
     for (int t = 0; t < 20; t++) {  // Try for 20 seconds
@@ -479,6 +560,12 @@ bool connectToWiFi() {
   }
 }
 
+/**
+ * @brief Checks WiFi status and reconnects if the connection was lost.
+ *
+ * Called once per 60 s from the main loop.  Delegates to connectToWiFi().
+ * Thread-safety: main task only.
+ */
 void doCheckWiFiConnection() {
   debugln(DEBUG_TRACE, __LINE__);
   if (WiFi.status() != WL_CONNECTED) {
@@ -526,6 +613,15 @@ String wpspin2string(uint8_t a[]) {
   return (String)wps_pin;
 }
 
+/**
+ * @brief WiFi and WPS event handler — called from a separate FreeRTOS task.
+ *
+ * @warning Accesses shared globals (ssid, pwd, checkWifiConnectionFlag, debugBuffer*).
+ *          These accesses are not mutex-protected (BUG-06); checkWifiConnectionFlag is
+ *          declared volatile as a minimum guard.
+ * @param event  WiFi event type.
+ * @param info   Event-specific payload.
+ */
 // WARNING: WiFiEvent is called from a separate FreeRTOS task (thread)!
 void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
   debugln(DEBUG_TRACE, __LINE__);
@@ -535,7 +631,7 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
       break;
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       debugln(DEBUG_INFO, "Connecting to SSID: " + WiFi.SSID());
-      debugln(DEBUG_TRACE, "Password: " + WiFi.psk());
+      // BUG-07 fix: PSK must not be stored in the HTTP-accessible debug buffer.
       ssid = WiFi.SSID();
       pwd = WiFi.psk();
       prefs.putString("ssid", ssid);
@@ -573,6 +669,15 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
   }
 }
 
+/**
+ * @brief Handles one incoming HTTP request and sends the appropriate response.
+ *
+ * Parses the raw HTTP request from the WiFiClient line by line.  Serves the
+ * configuration page (GET /), AJAX endpoints (/H /O /M /P), static assets
+ * (jQuery, CSS), debug pages (/Da /Db /Dc), and processes the settings form (POST /).
+ * Blocking: reads until client disconnects.  Called from loop().
+ * Thread-safety: main task only.
+ */
 void webServerReaction() {
   debugln(DEBUG_TRACE, __LINE__);
   WiFiClient client = server.accept();
@@ -626,10 +731,7 @@ void webServerReaction() {
           } else if (currentLine.startsWith("GET /O")) {
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Average humidity block: " + currentLine);
             page = PAGE_HUMIDITY;
-          } else if (currentLine.startsWith("GET /M")) {
-            debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Current hysteresis mode: " + currentLine);
-            page = PAGE_MODE;
-          } else if (currentLine.startsWith("GET /P")) {
+          } else if (currentLine.startsWith("GET /P")) {  // BUG-08 fix: removed duplicate GET /M branch that was dead code.
             debugln(DEBUG_DEBUG, client.remoteIP().toString() + " -> Pump current block: " + currentLine);
             page = PAGE_PUMPVAL;
           } else if (currentLine.startsWith("GET /T")) {
@@ -1118,6 +1220,12 @@ void webServerReaction() {
   }
 }
 
+/**
+ * @brief Starts WPS push-button mode and registers the WiFi event handler.
+ *
+ * Registers WiFiEvent(), sets station mode, initialises WPS config and starts WPS.
+ * The WiFiEvent callback stores credentials and calls server.begin() on success.
+ */
 void wpsSetup() {
   WiFi.onEvent(WiFiEvent);  // Will call WiFiEvent() from another thread.
   WiFi.mode(WIFI_MODE_STA);
