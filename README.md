@@ -145,8 +145,9 @@ Plantcare.ino
 globals is a known limitation (see CHANGELOG).
 
 **Pump GPIO:**  GPIO 33 — LOW-active relay (HIGH = off, LOW = on).  
-**Sensor GPIOs:** 34, 35, 39 (ADC1, 10-bit resolution, 0–1023).  
-**Current sense:** GPIO 36 — ADC reading scaled by `PUMP_CURRENT_MULTIPLIER` (2.8).
+**Sensor GPIOs:** 34, 35, 39 (ADC1, 10-bit resolution, 0–1023).  Max count defined by `constexpr MAX_SENSORS`.  
+**Current sense:** GPIO 36 — ADC reading scaled by `PUMP_CURRENT_MULTIPLIER` (2.8).  
+**HTTP:** Responses include `Connection: close`; keep-alive is not supported.
 
 ---
 
@@ -227,6 +228,10 @@ Plantcare/
 * **BUG-06 (data race):** `WiFiEvent` runs in a FreeRTOS task and writes to shared
   `String` globals without a mutex.  Occasional garbled debug output or spurious
   reconnects are theoretically possible.  Full fix would require FreeRTOS semaphores.
+* **POST parsing fragility:** Form fields are parsed with `indexOf()`/`substring()`.
+  If a field name is absent, `indexOf()` returns -1 and `substring()` silently reads
+  from position 0, potentially writing incorrect values to NVS.  Checkbox fields
+  (`gpio*`, `serialDebug`) are safe (they use the `indexOf != -1` pattern).
 * **No HTTPS on ESP32 web server:** The built-in HTTP server serves plain HTTP.
   Use only on a trusted local network.
 * **No authentication** on the web UI: anyone on the same network can change settings

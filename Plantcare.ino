@@ -26,6 +26,7 @@
  *   Relais  https://forum.fritzing.org/t/kf-301-relay-request/7992/10
  */
 #include <Arduino.h>
+#include <cmath>
 #include <esp_wps.h>
 #include <HTTPClient.h>
 #include <incbin.h>
@@ -95,11 +96,12 @@ INCTXT(NStyle, "n.css");
 // https://wiki.csgalileo.org/_media/projects/internetofthings/d1_mini_esp32_-_pinout.pdf
 Preferences prefs;
 int sensorPort[] = { HUMIDITY_SENSOR_GPIO_NUMBERS };
-int sensorPortTotalNumber = sizeof(sensorPort) / sizeof(int);
-bool activeSensor[sizeof(sensorPort) / sizeof(int)];
-double averageHumidity[sizeof(sensorPort) / sizeof(int)];
-int sensorDryHumidity[sizeof(sensorPort) / sizeof(int)];
-int sensorWetHumidity[sizeof(sensorPort) / sizeof(int)];
+constexpr int MAX_SENSORS = sizeof(sensorPort) / sizeof(int);
+int sensorPortTotalNumber = MAX_SENSORS;
+bool activeSensor[MAX_SENSORS];
+double averageHumidity[MAX_SENSORS];
+int sensorDryHumidity[MAX_SENSORS];
+int sensorWetHumidity[MAX_SENSORS];
 double overallAverageHumidity, lastOverallAverageHumidity;
 WiFiServer server(80);
 unsigned long startOfMainLoopMillis, lastMillis60s, startPumpMillis, lastPumpStartMillis, refreshPagesMillis;
@@ -117,7 +119,11 @@ String debugBufferArray[DEBUG_BUFFER_SIZE];
 String debugBufferLine;
 int debugBufferIndexNextEmpty, debugBufferIndexLastShown, debugLevel;
 
-// Variadic template functions
+// Variadic template functions.
+// @warning  NOT thread-safe.  debugBufferLine, debugBufferArray, and
+//           debugBufferIndexNextEmpty are mutated here (main loop task) but
+//           WiFiEvent() (a separate FreeRTOS task) also calls debugln().
+//           Protect with a FreeRTOS mutex for full correctness.  See BUG-06.
 template<typename... Args> void debug(const int level, Args... args) {
   if (serialDebug)
     Serial.print(args...);
@@ -159,7 +165,7 @@ template<typename... Args> void debugln(const int level, Args... args) {
     if (getLocalTime(&timeinfo))
       strftime(buffer, sizeof(buffer), "%d.%m.%y %H:%M:%S", &timeinfo);
     else
-      sprintf(buffer, "%8d %02d:%02d:%02d", d, h, m, s);
+      snprintf(buffer, sizeof(buffer), "%8d %02d:%02d:%02d", d, h, m, s);
     debugBufferArray[debugBufferIndexNextEmpty++] = String(buffer) + " [" + sign + "] " + debugBufferLine;
     debugBufferLine = "";
     debugBufferIndexNextEmpty %= DEBUG_BUFFER_SIZE;
@@ -177,6 +183,9 @@ template<typename... Args> void debugln(const int level, Args... args) {
  * @param out_min Lower bound of output range.
  * @param out_max Upper bound of output range.
  * @return Mapped value.  Not clamped — callers must validate ranges.
+ * @note   Returns ±Inf or NaN if in_min == in_max (division by zero).
+ *         This can occur when sensor dry/wet calibration values are identical.
+ *         Ensure sensorDryHumidity[v] != sensorWetHumidity[v] at all times.
  */
 double mapf(const double x, const double in_min, const double in_max, const double out_min, const double out_max) {
   return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
@@ -187,17 +196,22 @@ void setup() {
   // serialDebug = true;        // DEBUG
   // serialDebugActive = true;  // DEBUG
 
+  // --- Phase 1: GPIO & hardware initialisation ---
   analogReadResolution(10);  // Backwards compatibility: 0-1023
   pinMode(LED_BUILTIN, OUTPUT);
 
   pinMode(PUMP_ACTIVE_GPIO_NUMBER, OUTPUT);
   digitalWrite(PUMP_ACTIVE_GPIO_NUMBER, HIGH);  // The used relais is LOW active!
 
+  // --- Phase 2: NVS / Preferences init ---
   // IMP-02: check NVS initialisation; log on failure and continue with defaults.
   if (!prefs.begin("p")) {
     debugln(DEBUG_ERROR, "NVS init failed, all settings will use defaults");
   }
 
+  // --- Phase 3: Sensor enumeration, calibration load & ADC preload ---
+  // Each active sensor is seeded with 20 ADC readings so that the EMA in loop()
+  // starts from a realistic baseline value rather than 0.
   int numberOfActiveSensors = 0;
   overallAverageHumidity = 0;
   for (int v = 0; v < sensorPortTotalNumber; v++) {
@@ -229,6 +243,7 @@ void setup() {
   if (numberOfActiveSensors > 0)
     overallAverageHumidity /= numberOfActiveSensors;
 
+  // --- Phase 4: Load all persisted settings from NVS ---
   ssid = prefs.getString("ssid");
   pwd = prefs.getString("password");
   humidityThresholdUpper = prefs.getInt("threshold1");
@@ -242,6 +257,8 @@ void setup() {
   reportURL = prefs.getString("reportURL");
   debugLevel = prefs.getInt("debugLevel");
   stylesheet = prefs.getString("stylesheet");
+
+  // --- Phase 5: Apply factory defaults for uninitialised NVS keys ---
   if (numberOfActiveSensors == 0) {
     debugln(DEBUG_INFO, "No GPIO enabled, activating first in line");
     char portname[7];  // gpioXX\0
@@ -257,7 +274,9 @@ void setup() {
     humidityThresholdLower = 50;      // Dry: ~673, Submerged: ~264 absolute
     prefs.putInt("threshold2", humidityThresholdLower);
   }
-  if (isnan(pumpRuntime1InSeconds)) {
+  // BUG-fix: prefs.getDouble() returns 0.0 (not NaN) for a missing key, so isnan()
+  //          alone never fires on a blank device.  The <= 0.0 guard covers that case.
+  if (isnan(pumpRuntime1InSeconds) || pumpRuntime1InSeconds <= 0.0) {
     pumpRuntime1InSeconds = 7.0;
     prefs.putDouble("pumptime1", pumpRuntime1InSeconds);
   }
@@ -265,7 +284,7 @@ void setup() {
     pumpDelay1InMinutes = 360;
     prefs.putInt("pumpdelay1", pumpDelay1InMinutes);
   }
-  if (isnan(pumpRuntimeNInSeconds)) {
+  if (isnan(pumpRuntimeNInSeconds) || pumpRuntimeNInSeconds <= 0.0) {  // BUG-fix: see note above
     pumpRuntimeNInSeconds = 0.8;
     prefs.putDouble("pumptimeN", pumpRuntimeNInSeconds);
   }
@@ -294,6 +313,7 @@ void setup() {
     prefs.putString("stylesheet", stylesheet);
   }
 
+  // --- Phase 6: WiFi (stored creds → ssidAndPassword.h fallback → WPS push-button) ---
   if (!connectToWiFi()) {
     digitalWrite(LED_BUILTIN, HIGH);
     WiFi.disconnect(true, true);  // Wipe credentials or it looks like it won't work!
@@ -301,13 +321,18 @@ void setup() {
     checkWifiConnectionFlag = false;
   }
 
+  // --- Phase 7: Initial hysteresis state ---
+  // If humidity is already between the two thresholds on boot, skip the long first
+  // pump run and enter cyclic (short) mode immediately (pumpCycleIndex = 1).
   if (overallAverageHumidity > humidityThresholdLower && overallAverageHumidity < humidityThresholdUpper)
-    pumpCycleIndex = 1; // In case of being between the two thresholds on startup skip the long pumping run and start directly with the short ones
+    pumpCycleIndex = 1;
 }
 
 void loop() {
-  if (startOfMainLoopMillis == 0)
+  if (startOfMainLoopMillis == 0) {
     startOfMainLoopMillis = millis();  // For averaging stuff warmup phase
+    lastMillis60s = startOfMainLoopMillis;  // Prevent immediate WiFi check on first iteration
+  }
 
   if (serialDebug && !serialDebugActive) {  // Only initialize once
     Serial.begin(115200);
@@ -318,6 +343,7 @@ void loop() {
   webServerReaction();
   debugln(DEBUG_TRACE, __LINE__);
 
+  // --- Sensor read: update exponential moving average per active sensor (α = 0.02) ---
   overallAverageHumidity = 0;
   int sensorcount = 0;
   for (int v = 0; v < sensorPortTotalNumber; v++) {
@@ -335,7 +361,7 @@ void loop() {
 
   unsigned long currentMillis = millis();
   // Pump mode hysteresis for mold prevention - only check for switching down after pump cooldown!
-  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThresholdUpper && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {
+  if (!humidityThresholdHysteresisFalling && overallAverageHumidity >= humidityThresholdUpper && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (unsigned long)(pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000UL)) {
     debugln(DEBUG_TRACE, __LINE__);
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is equal to or above upper threshold (" + String(humidityThresholdUpper) + "), switching to falling mode");
     humidityThresholdHysteresisFalling = true;
@@ -346,13 +372,18 @@ void loop() {
     pumpCycleIndex = 0;
   }
 
+  // --- Status reporting: fire on ≥0.5% humidity change, after 5 s warmup ---
+  // NOTE: abs() is the integer overload in standard C++; it truncates the fractional
+  //       part before comparison.  Arduino's abs() macro works correctly here, but
+  //       fabs() is the portable/explicit choice for double arithmetic.
   currentMillis = millis();
-  if (abs(lastOverallAverageHumidity - overallAverageHumidity) >= .5 && currentMillis - startOfMainLoopMillis > 5000) {  // Only after average warmup
+  if (fabs(lastOverallAverageHumidity - overallAverageHumidity) >= .5 && currentMillis - startOfMainLoopMillis > 5000) {  // Only after average warmup
     debugln(DEBUG_TRACE, __LINE__);
     doStatusReporting();
     lastOverallAverageHumidity = overallAverageHumidity;
   }
 
+  // --- WiFi watchdog: reconnect check every 60 s ---
   currentMillis = millis();
   if (currentMillis - lastMillis60s > 60000) {
     debugln(DEBUG_TRACE, __LINE__);
@@ -364,8 +395,11 @@ void loop() {
     lastMillis60s += 60000;
   }
 
+  // --- Pump start: rising mode only, below upper threshold, past warmup & inter-pump delay ---
+  // pumpCycleIndex 0→1: first (long) run; pumpCycleIndex >1: subsequent (short) runs.
+  // Cast delay to unsigned long to avoid int overflow for large delay values.
   currentMillis = millis();
-  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThresholdUpper && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000)) {  // Only after average warmup
+  if (startPumpMillis == 0 && !humidityThresholdHysteresisFalling && overallAverageHumidity < humidityThresholdUpper && currentMillis - startOfMainLoopMillis > 5000 && (lastPumpStartMillis == 0 || currentMillis > lastPumpStartMillis + (unsigned long)(pumpCycleIndex <= 1 ? pumpDelay1InMinutes : pumpDelayNInMinutes) * 60000UL)) {  // Only after average warmup
     debugln(DEBUG_TRACE, __LINE__);
     pumpCycleIndex++;  // Increase before pumping starts or log output, or log output will be wrong
     debugln(DEBUG_INFO, "Average humidity (" + String(overallAverageHumidity) + ") is lower than upper threshold (" + String(humidityThresholdUpper) + "), starting pump for " + String(pumpCycleIndex <= 1 ? pumpRuntime1InSeconds : pumpRuntimeNInSeconds) + " seconds");
@@ -377,6 +411,7 @@ void loop() {
     debugln(DEBUG_VERBOSE, String(currentPumpCurrentValue) + " mA");
   }
 
+  // --- Pump stop: runtime elapsed, or millis() overflow guard (~49.7-day rollover) ---
   currentMillis = millis();
   if (startPumpMillis != 0 && (currentMillis - startPumpMillis > (pumpCycleIndex <= 1 ? pumpRuntime1InSeconds : pumpRuntimeNInSeconds) * 1000 || currentMillis < startPumpMillis)) {  // Force switch off pump in case of timer overflow (every ~52 days)
     stopPump();
@@ -390,13 +425,15 @@ void loop() {
     }
   }
 
+  // --- Pump current sampling: 20 × 1 ms samples, EMA α = 0.01 per sample ---
   for (int t = 0; t < 20; t++) {
     currentPumpCurrentValue = currentPumpCurrentValue * .99 + (analogRead(PUMP_CURRENT_GPIO_NUMBER) * PUMP_CURRENT_MULTIPLIER) * .01;
     delay(1);
   }
 
+  // --- Adaptive delay: 300 ms when idle; 2 ms during pump run or active page load ---
   currentMillis = millis();
-  delay(startPumpMillis == 0 && currentMillis - refreshPagesMillis > 5000 ? 300 : 2);  // React quickly on startup and page load as well as when pump is running
+  delay(startPumpMillis == 0 && currentMillis - refreshPagesMillis > 5000 ? 300 : 2);
 }
 
 /**
@@ -675,15 +712,30 @@ void WiFiEvent(WiFiEvent_t event, arduino_event_info_t info) {
  * Parses the raw HTTP request from the WiFiClient line by line.  Serves the
  * configuration page (GET /), AJAX endpoints (/H /O /M /P), static assets
  * (jQuery, CSS), debug pages (/Da /Db /Dc), and processes the settings form (POST /).
- * Blocking: reads until client disconnects.  Called from loop().
+ * Blocking: reads until the client disconnects or the response is fully sent.
  * Thread-safety: main task only.
+ *
+ * POST state machine:
+ *   PAGE_DEFAULT        — receives "POST /" request line          → PAGE_DEFAULT_POST1
+ *   PAGE_DEFAULT_POST1  — receives blank line (end of headers)    → PAGE_DEFAULT_POST2
+ *   PAGE_DEFAULT_POST2  — accumulates body bytes until lineLength == contentLength,
+ *                         then injects synthetic '\n', parses URL-encoded fields,
+ *                         writes to NVS, and resets to PAGE_DEFAULT.
+ *
+ * @warning  Body fields are parsed with indexOf()/substring().  indexOf() returns
+ *           -1 when a field is absent; substring(-1 + n) then reads from offset 0
+ *           and silently writes a wrong value to NVS.  Unchecked GPIO checkboxes
+ *           are handled correctly (indexOf != -1 pattern).
+ * @warning  A stalled TCP client blocks the entire loop() — including the pump
+ *           cutoff path — until the connection drops.  Consider client.setTimeout().
  */
 void webServerReaction() {
   debugln(DEBUG_TRACE, __LINE__);
   WiFiClient client = server.accept();
   if (client) {
     String currentLine = "";
-    int contentLength, lineLength;
+    int contentLength = 0, lineLength = 0;  // BUG-fix: must be zero-init; unset contentLength
+                                            //          causes spurious POST body trigger.
     while (client.connected()) {
       if (client.available()) {
         char c = client.read();
@@ -778,10 +830,16 @@ void webServerReaction() {
 
             humidityThresholdUpper = currentLine.substring(currentLine.indexOf("threshold1") + String("threshold1").length() + 1).toInt();
             humidityThresholdUpper = humidityThresholdUpper <= 0 ? 1 : (humidityThresholdUpper >= 100 ? 99 : humidityThresholdUpper);
-            prefs.putInt("threshold1", humidityThresholdUpper);
 
             humidityThresholdLower = currentLine.substring(currentLine.indexOf("threshold2") + String("threshold2").length() + 1).toInt();
             humidityThresholdLower = humidityThresholdLower <= 0 ? 1 : (humidityThresholdLower >= 100 ? 99 : humidityThresholdLower);
+            // Swap if user entered upper < lower (prevents stuck hysteresis).
+            if (humidityThresholdUpper < humidityThresholdLower) {
+              int tmp = humidityThresholdUpper;
+              humidityThresholdUpper = humidityThresholdLower;
+              humidityThresholdLower = tmp;
+            }
+            prefs.putInt("threshold1", humidityThresholdUpper);
             prefs.putInt("threshold2", humidityThresholdLower);
 
             pumpRuntime1InSeconds = currentLine.substring(currentLine.indexOf("pumptime1") + String("pumptime1").length() + 1).toDouble();
@@ -846,6 +904,7 @@ void webServerReaction() {
               page = PAGE_DEFAULT_POST2;
             } else {
               client.println("HTTP/1.1 200 OK");
+              client.println("Connection: close");
               if (page == PAGE_HUMIDITYVAL) {
                 client.println("Content-type:application/json;charset=utf-8");
                 client.println();
